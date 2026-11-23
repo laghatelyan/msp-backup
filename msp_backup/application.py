@@ -31,8 +31,7 @@ class BackupWorkflowManager:
                     continue
                 if not target.exists():
                     info(f"Migrating legacy secret {source.name} to encrypted storage.")
-                    subprocess.run(["systemd-creds", "encrypt", "--with-key=auto", f"--name={name}", str(source), str(target)], check=True)
-                    os.chmod(target, 0o600)
+                    encrypt_credential(name, source.read_bytes(), target)
                 remove_old_secret(source)
         old_dump = Path("/var/lib/msp-backup/db-dumps")
         for filename in ("mysql-all.sql", "postgresql-all.sql", "sqlite-database.db", "mysql-all.sql.tmp", "postgresql-all.sql.tmp", "sqlite-database.db.tmp"):
@@ -461,15 +460,19 @@ class BackupApplication:
         self.system.require_root()
         self.system.detect_family()
         self.install_self()
-        self.system.ensure_credential_support()
         self.system.configure_logging()
+        if not self.argv:
+            self.system.install_dependencies()
+        credential_backend = self.system.ensure_credential_support()
+        logger.info("Selected credential encryption backend: %s", credential_backend)
         imported = self.workflows.import_legacy_config()
         self.workflows.migrate_legacy_secrets()
         if imported and RESTIC_BIN.exists() and RESTIC_PASSWORD_CRED.exists() and CONFIG_FILE.exists() and PATHS_FILE.exists():
             self.workflows.write_units(self.config.read_json(CONFIG_FILE, {}))
         if self.dispatch_system_action():
             return 0
-        self.system.install_dependencies()
+        if self.argv:
+            self.system.install_dependencies()
         if not LOGROTATE.exists():
             self.system.write_logrotate()
         if CONFIG_FILE.exists():

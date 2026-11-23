@@ -4,10 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msp-backup"
-version = "1.1.5"
+version = "1.2.0"
 description = "Single-server Restic backup management for MSP environments"
 requires-python = ">=3.9"
 dependencies = []
+
+[project.optional-dependencies]
+python-crypto = ["cryptography>=3.4"]
 
 [project.scripts]
 msp-backup = "msp_backup.application:main"

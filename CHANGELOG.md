@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+
+- Added a Python Fernet credential backend for systems without systemd-creds 250+.
+- Kept systemd-creds as the preferred backend when available and made cryptography an optional dependency.
+
 ## 1.1.5
 
 - Added clear menu/action/result separators.

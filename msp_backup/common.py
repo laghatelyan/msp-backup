@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,7 @@ RESTIC_PASSWORD_CRED = ETC / "restic-password.cred"
 DB_PASSWORD_CRED = ETC / "database-password.cred"
 
 SMTP_PASSWORD_CRED = ETC / "smtp-password.cred"
+PYTHON_CREDENTIAL_KEY = ETC / "credential.key"
 
 LEGACY_MYSQL_CRED = ETC / "database-mysql-config.cred"
 
@@ -60,6 +62,7 @@ RESTIC_API = "https://api.github.com/repos/restic/restic/releases/latest"
 logger = logging.getLogger("msp-backup")
 
 FAMILY = ""
+CREDENTIAL_BACKEND = ""
 
 
 
@@ -135,13 +138,25 @@ class SystemManager:
         if os.geteuid() != 0:
             fail("Run this script with sudo or as root.")
 
-    def ensure_credential_support(self):
+    def systemd_creds_supported(self):
         if not shutil.which("systemd-creds") or not shutil.which("systemd"):
-            fail("systemd-creds and systemd version 250 or later are required. Passwords will not be stored in plaintext.")
+            return False
         result = subprocess.run(["systemd", "--version"], capture_output=True, text=True)
         match = re.search(r"systemd\s+(\d+)", result.stdout)
-        if not match or int(match.group(1)) < 250:
-            fail("systemd version 250 or later is required to encrypt secrets.")
+        return bool(match and int(match.group(1)) >= 250)
+
+    def ensure_credential_support(self):
+        global CREDENTIAL_BACKEND
+        if self.systemd_creds_supported():
+            CREDENTIAL_BACKEND = "systemd"
+            return CREDENTIAL_BACKEND
+        try:
+            from cryptography.fernet import Fernet  # noqa: F401
+        except ImportError:
+            CREDENTIAL_BACKEND = ""
+            fail("Secret encryption needs systemd-creds (systemd 250+) or the Python package 'cryptography'.")
+        CREDENTIAL_BACKEND = "python"
+        return CREDENTIAL_BACKEND
 
     def detect_family(self):
         global FAMILY
@@ -208,20 +223,38 @@ class SystemManager:
         missing = [name for name in required if not shutil.which(name)]
         if not shutil.which("fusermount3") and not shutil.which("fusermount"):
             missing.append("FUSE (fusermount)")
+        needs_crypto = not self.systemd_creds_supported()
+        if needs_crypto:
+            try:
+                from cryptography.fernet import Fernet  # noqa: F401
+            except ImportError:
+                missing.append("Python cryptography library")
         if not missing:
             return
         print(f"Missing dependencies: {', '.join(missing)}")
-        if input("Install system utilities and FUSE now? [y/N] ").strip().lower() != "y":
+        if input("Install the missing system/Python dependencies now? [y/N] ").strip().lower() != "y":
             fail("Dependencies were not installed.")
         if FAMILY == "debian":
+            packages = ["bzip2", "coreutils", "util-linux", "fuse3", "logrotate"]
+            if needs_crypto:
+                try:
+                    from cryptography.fernet import Fernet  # noqa: F401
+                except ImportError:
+                    packages.append("python3-cryptography")
             commands = [
                 ["apt-get", "update"],
-                ["apt-get", "install", "-y", "bzip2", "coreutils", "util-linux", "fuse3", "logrotate"],
+                ["apt-get", "install", "-y", *packages],
             ]
         else:
             manager = "dnf" if shutil.which("dnf") else "yum"
+            packages = ["bzip2", "coreutils", "util-linux", "logrotate"]
+            if needs_crypto:
+                try:
+                    from cryptography.fernet import Fernet  # noqa: F401
+                except ImportError:
+                    packages.append("python3-cryptography")
             commands = [
-                [manager, "install", "-y", "bzip2", "coreutils", "util-linux", "logrotate"],
+                [manager, "install", "-y", *packages],
                 [manager, "install", "-y", "fuse3"],
             ]
         for command in commands:
@@ -265,19 +298,92 @@ class CredentialStore:
         if path and str(path).startswith("/run/msp-backup."):
             shutil.rmtree(path, ignore_errors=True)
 
+    def _fernet(self):
+        try:
+            from cryptography.fernet import Fernet
+        except ImportError:
+            fail("The Python cryptography package is required for file-based credential encryption.")
+        ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chown(ETC, 0, 0)
+        os.chmod(ETC, 0o700)
+        if not PYTHON_CREDENTIAL_KEY.exists():
+            key = Fernet.generate_key()
+            fd, temporary_name = tempfile.mkstemp(prefix="credential-key.", dir=ETC)
+            temporary = Path(temporary_name)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as key_file:
+                    key_file.write(key)
+                    key_file.flush()
+                    os.fsync(key_file.fileno())
+                os.chown(temporary, 0, 0)
+                try:
+                    os.link(temporary, PYTHON_CREDENTIAL_KEY)
+                except FileExistsError:
+                    pass
+            finally:
+                temporary.unlink(missing_ok=True)
+        try:
+            metadata = PYTHON_CREDENTIAL_KEY.lstat()
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                    or metadata.st_mode & 0o077):
+                fail("The credential key must be a root-owned regular file with mode 0600.")
+            return Fernet(PYTHON_CREDENTIAL_KEY.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise BackupError(f"Could not load the Python credential key: {exc}") from exc
+
+    @staticmethod
+    def _write_protected(destination, content):
+        fd, temporary_name = tempfile.mkstemp(prefix=f"{destination.name}.", dir=destination.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chown(temporary, 0, 0)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, destination)
+            os.chown(destination, 0, 0)
+            os.chmod(destination, 0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def encrypt_credential(self, name, plaintext, destination):
         ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(ETC, 0o700)
-        result = subprocess.run(
-            ["systemd-creds", "encrypt", "--with-key=auto", f"--name={name}", "-", str(destination)],
-            input=plaintext,
-        )
-        if result.returncode:
-            fail(f"Could not encrypt secret {name}.")
-        os.chown(destination, 0, 0)
-        os.chmod(destination, 0o600)
+        if CREDENTIAL_BACKEND == "systemd":
+            result = subprocess.run(
+                ["systemd-creds", "encrypt", "--with-key=auto", f"--name={name}", "-", str(destination)],
+                input=plaintext,
+            )
+            if result.returncode:
+                fail(f"Could not encrypt secret {name}.")
+            os.chown(destination, 0, 0)
+            os.chmod(destination, 0o600)
+            return
+        if CREDENTIAL_BACKEND == "python":
+            encrypted = b"MSP-BACKUP-FERNET-1\n" + self._fernet().encrypt(plaintext)
+            self._write_protected(destination, encrypted)
+            return
+        fail("No credential encryption backend has been selected.")
 
     def decrypt_credential(self, name, source, destination):
+        try:
+            stored = source.read_bytes()
+        except OSError as exc:
+            raise BackupError(f"Could not read credential {name}: {exc}") from exc
+        marker = b"MSP-BACKUP-FERNET-1\n"
+        if stored.startswith(marker):
+            try:
+                plaintext = self._fernet().decrypt(stored[len(marker):])
+            except Exception as exc:
+                raise BackupError(f"Could not decrypt credential {name} with the local Python key.") from exc
+            self._write_protected(destination, plaintext)
+            return
+        if not shutil.which("systemd-creds"):
+            raise BackupError(f"Credential {name} uses systemd-creds encryption; restore it on its original host or systemd 250+.")
         result = subprocess.run(["systemd-creds", "decrypt", f"--name={name}", str(source), str(destination)])
         if result.returncode:
             raise BackupError(f"Could not decrypt credential {name}.")
