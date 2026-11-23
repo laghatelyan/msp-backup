@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+
+- Initialize and inject the Restic manager in the application composition root.
+
 ## 1.1.1
 
 - Finalized package installation and update handling for the modular release.

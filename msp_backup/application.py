@@ -8,7 +8,7 @@ import time
 
 
 from .common import BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LOGROTATE, LOG_FILE, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_PASSWORD_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, yes_no
-from .restic import ensure_restic, restic, restic_installer, update_restic
+from .restic import ensure_restic, restic, restic_installer, restic_manager, update_restic
 from .database import configure_database, database_backup_manager
 from .notifications import configure_log_rotation, configure_notifications, notification_manager
 from .updates import check_script_update, configure_update_url, install_script_update_timer, update_manager

@@ -46,6 +46,8 @@ class ResticManager:
         finally:
             remove_runtime(work)
 
+restic_manager = ResticManager()
+
 
 def restic(*args, check=True, quiet=False):
     return restic_manager.run(*args, check=check, quiet=quiet)
