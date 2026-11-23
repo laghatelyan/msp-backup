@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.0
+
+- Added bounded repository data verification (1 MiB–1 GiB) without restoring files locally.
+- Added a one-file restore drill with free-space preflight and automatic temporary-file cleanup.
+- Added protected last-run reports and richer SMTP success/failure summaries.
+
 ## 1.8.0
 
 - Removed duplicate snapshot restore and repository settings entries from the main menu.

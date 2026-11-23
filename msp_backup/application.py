@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import posixpath
 from urllib.parse import urlsplit
 import json
@@ -10,10 +10,11 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 
-from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, ui, yes_no
+from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, RUN_REPORT_FILE, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, ui, yes_no
 from .common import BackupError, logger
 from .restic import ensure_restic, restic, restic_installer, restic_manager, update_restic
 from .database import configure_database, database_backup_manager
@@ -473,10 +474,44 @@ class BackupWorkflowManager:
         info("Setup complete; the daily timer is enabled for 02:30.")
 
     def run_backup(self):
-        config = load_config()
+        load_config()
         if not PATHS_FILE.exists():
             fail("The backup path list was not found.")
-        restic("backup", "--tag", BACKUP_TAG, "--files-from", str(PATHS_FILE))
+        started = datetime.now(timezone.utc)
+        timer = time.monotonic()
+        try:
+            restic("backup", "--tag", BACKUP_TAG, "--files-from", str(PATHS_FILE))
+        except Exception as exc:
+            self.save_run_report({
+                "result": "failure", "started_at": started.isoformat(timespec="seconds"),
+                "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "duration_seconds": round(time.monotonic() - timer), "error": str(exc),
+            })
+            raise
+        latest = {}
+        try:
+            host_name = os.uname().nodename
+            output = restic("snapshots", "--json", "--host", host_name, "--tag", BACKUP_TAG,
+                            quiet=True, capture_output=True)
+            snapshots = json.loads(output or "[]")
+            if isinstance(snapshots, list) and snapshots:
+                snapshots.sort(key=lambda item: item.get("time", ""), reverse=True)
+                latest = {key: snapshots[0].get(key) for key in ("short_id", "id", "time", "hostname")}
+        except Exception as exc:
+            logger.warning("Backup completed but its report could not read snapshot metadata: %s", exc)
+        self.save_run_report({
+            "result": "success", "started_at": started.isoformat(timespec="seconds"),
+            "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "duration_seconds": round(time.monotonic() - timer), "snapshot": latest,
+        })
+
+    @staticmethod
+    def save_run_report(report):
+        report["server"] = os.uname().nodename
+        try:
+            save_json(RUN_REPORT_FILE, report)
+        except OSError as exc:
+            logger.warning("Could not save backup run report: %s", exc)
 
     def prune_backups(self):
         config = load_config()
@@ -670,6 +705,77 @@ class BackupWorkflowManager:
             ui.status("This snapshot contains no browsable file entries.", "warning")
         return nodes
 
+    def test_restore_file(self):
+        snapshot = self.select_snapshot()
+        if snapshot is None:
+            return
+        nodes = self.load_snapshot_nodes(snapshot["id"])
+        files = [node for node in nodes if node.get("type") == "file"]
+        if not files:
+            ui.status("The selected snapshot contains no regular files to test.", "warning")
+            return
+        options = []
+        for index, node in enumerate(files, start=1):
+            path = node["path"].replace("\n", "\\n").replace("\r", "\\r")
+            size = self.format_size(node.get("size")) or "size unknown"
+            options.append((str(index), path, size))
+        options.append(("0", "Cancel"))
+        choice = ui.select("TEST RESTORE · SELECT FILE", options,
+                           f"{self.snapshot_label(snapshot)} · restores one file, then removes the temporary copy")
+        if choice in (None, "0"):
+            return
+        try:
+            node = files[int(choice) - 1]
+            expected_size = int(node["size"])
+        except (ValueError, IndexError, KeyError, TypeError):
+            fail("The selected file has no valid size metadata; choose another file.")
+        required = expected_size + max(1024 * 1024, min(16 * 1024 * 1024, expected_size // 10))
+        while True:
+            base_text = input("Existing directory for temporary restore test (0 to cancel): ").strip()
+            if base_text == "0":
+                return
+            base = Path(base_text)
+            if not base.is_absolute() or not base.is_dir():
+                ui.status("Enter an existing absolute directory; no directory will be created for you.", "error")
+                continue
+            try:
+                free = shutil.disk_usage(base).free
+            except OSError as exc:
+                ui.status(f"Could not check free space: {exc}", "error")
+                continue
+            if free < required:
+                ui.status(f"Not enough free space: {self.format_size(free)} available; about {self.format_size(required)} recommended. Choose another directory or cancel.", "warning")
+                continue
+            if not os.access(base, os.W_OK | os.X_OK):
+                ui.status("The selected directory is not writable by root.", "error")
+                continue
+            break
+        ui.section("Restore test plan")
+        print(f"Snapshot: {self.snapshot_label(snapshot)}")
+        print(f"File:     {node['path']}")
+        print(f"Size:     {self.format_size(expected_size)}")
+        print(f"Free:     {self.format_size(free)}")
+        print("The temporary copy is removed automatically after the check.")
+        if not yes_no("Run this restore test?", default=False):
+            return
+        temporary = Path(tempfile.mkdtemp(prefix="msp-backup-restore-test-", dir=base))
+        try:
+            os.chmod(temporary, 0o700)
+            restic("restore", snapshot["id"], "--target", str(temporary),
+                   "--include", self.restic_include_pattern(node["path"]))
+            restored = temporary / node["path"].lstrip("/")
+            if not restored.is_file():
+                fail("Restic completed, but the selected file was not found in the temporary restore.")
+            actual_size = restored.stat().st_size
+            if actual_size != expected_size:
+                fail(f"Restored file size differs from snapshot metadata ({actual_size} vs {expected_size} bytes).")
+            ui.status(f"Restore test passed: {node['path']} ({self.format_size(actual_size)}).", "success")
+        finally:
+            try:
+                shutil.rmtree(temporary)
+            except OSError as exc:
+                ui.status(f"Could not remove the temporary restore directory {temporary}: {exc}", "warning")
+
     def restore_selected_items(self, snapshot_id):
         nodes = self.load_snapshot_nodes(snapshot_id)
         if not nodes:
@@ -797,12 +903,28 @@ class BackupWorkflowManager:
 
     def snapshot_tools_menu(self):
         actions = {
-            "1": ("Check repository", lambda: restic("check")),
+            "1": ("Check repository structure", lambda: restic("check")),
             "2": ("Mount snapshots", mount_snapshots),
             "3": ("Unmount snapshots", unmount_snapshots),
             "4": ("Apply retention and prune", prune_backups),
+            "5": ("Verify repository data sample", self.verify_repository_sample),
+            "6": ("Test restore one file", self.test_restore_file),
         }
         self.run_submenu("SNAPSHOT TOOLS", actions)
+
+    def verify_repository_sample(self):
+        while True:
+            value = input("Data subset to read [100M, range 1M–1G, 0 to cancel]: ").strip().upper() or "100M"
+            if value == "0":
+                return
+            match = re.fullmatch(r"(\d+)([KMG])", value)
+            if match:
+                amount = int(match.group(1)) * {"K": 1024, "M": 1024**2, "G": 1024**3}[match.group(2)]
+                if 1024**2 <= amount <= 1024**3:
+                    break
+            ui.status("Enter a size from 1M to 1G, such as 100M or 1G.", "error")
+        ui.status(f"Reading a random repository data subset ({value}); no files will be restored locally.", "running")
+        restic("check", f"--read-data-subset={value}")
 
     def schedule_menu(self):
         actions = {

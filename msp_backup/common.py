@@ -41,6 +41,7 @@ S3_CREDENTIALS_CRED = ETC / "s3-credentials.cred"
 DB_PASSWORD_CRED = ETC / "database-password.cred"
 
 SMTP_PASSWORD_CRED = ETC / "smtp-password.cred"
+RUN_REPORT_FILE = ETC / "last-run.json"
 PYTHON_CREDENTIAL_KEY = ETC / "credential.key"
 
 LEGACY_MYSQL_CRED = ETC / "database-mysql-config.cred"
