@@ -287,8 +287,7 @@ class BackupWorkflowManager:
     def show_status(self):
         if RESTIC_BIN.exists():
             run_stream([str(RESTIC_BIN), "version"], label="Restic version")
-        for timer in ("msp-backup.timer", "msp-backup-update.timer"):
-            subprocess.run(["systemctl", "list-timers", "--all", timer], check=False)
+        subprocess.run(["systemctl", "list-timers", "--all", "msp-backup.timer", "msp-backup-update.timer"], check=False)
         config = read_json(CONFIG_FILE, {})
         db = read_json(DB_CONFIG_FILE, {})
         smtp = read_json(SMTP_CONFIG_FILE, {})
@@ -308,23 +307,6 @@ class BackupWorkflowManager:
             configure_update_url()
 
     def menu(self):
-        print("\nMSP Backup — Backup Management")
-        print(" 1) Install/configure backups")
-        print(" 2) Update Restic")
-        print(" 3) Enable the daily backup timer")
-        print(" 4) Status")
-        print(" 5) Run backup now")
-        print(" 6) List snapshots")
-        print(" 7) Check repository")
-        print(" 8) Restore snapshot")
-        print(" 9) Mount snapshots")
-        print("10) Unmount snapshots")
-        print("11) Apply retention and prune")
-        print("12) Configure database backups")
-        print("13) Configure logs, SMTP, and updates")
-        print("14) Check for MSP Backup updates")
-        print("15) Configure weekly MSP Backup auto-updates")
-        choice = input("Action (0 to exit): ").strip()
         actions = {
             "1": lambda: (ensure_restic(), setup_backup()),
             "2": update_restic,
@@ -342,8 +324,31 @@ class BackupWorkflowManager:
             "14": lambda: check_script_update(install=False),
             "15": install_script_update_timer,
         }
-        if choice in actions:
-            actions[choice]()
+        while True:
+            print("\nMSP Backup — Backup Management")
+            print(" 1) Install/configure backups")
+            print(" 2) Update Restic")
+            print(" 3) Enable the daily backup timer")
+            print(" 4) Status")
+            print(" 5) Run backup now")
+            print(" 6) List snapshots")
+            print(" 7) Check repository")
+            print(" 8) Restore snapshot")
+            print(" 9) Mount snapshots")
+            print("10) Unmount snapshots")
+            print("11) Apply retention and prune")
+            print("12) Configure database backups")
+            print("13) Configure logs, SMTP, and updates")
+            print("14) Check for MSP Backup updates")
+            print("15) Configure weekly MSP Backup auto-updates")
+            choice = input("Action (0 to exit): ").strip()
+            if choice == "0":
+                return
+            action = actions.get(choice)
+            if action is None:
+                print("Invalid choice. Select an item from 0 to 15.")
+                continue
+            action()
 
 backup_workflows = BackupWorkflowManager()
 migrate_legacy_secrets = backup_workflows.migrate_legacy_secrets

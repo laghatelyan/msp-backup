@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.4
+
+- Kept the interactive menu open after each action; `0` exits the menu.
+- Displayed the backup and update timers in one status query.
+
 ## 1.1.3
 
 - Prevented startup errors from being printed multiple times before logging is configured.
