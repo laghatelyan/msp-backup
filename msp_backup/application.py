@@ -8,6 +8,7 @@ import time
 
 
 from .common import BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LOGROTATE, LOG_FILE, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_PASSWORD_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, yes_no
+from .common import BackupError, logger
 from .restic import ensure_restic, restic, restic_installer, restic_manager, update_restic
 from .database import configure_database, database_backup_manager
 from .notifications import configure_log_rotation, configure_notifications, notification_manager
@@ -308,24 +309,26 @@ class BackupWorkflowManager:
 
     def menu(self):
         actions = {
-            "1": lambda: (ensure_restic(), setup_backup()),
-            "2": update_restic,
-            "3": lambda: write_units(read_json(CONFIG_FILE, {})),
-            "4": show_status,
-            "5": lambda: subprocess.run(["systemctl", "start", "msp-backup.service"], check=True),
-            "6": lambda: restic("snapshots"),
-            "7": lambda: restic("check"),
-            "8": restore_snapshot,
-            "9": mount_snapshots,
-            "10": unmount_snapshots,
-            "11": prune_backups,
-            "12": configure_database,
-            "13": configure_menu,
-            "14": lambda: check_script_update(install=False),
-            "15": install_script_update_timer,
+            "1": ("Install/configure backups", lambda: (ensure_restic(), setup_backup())),
+            "2": ("Update Restic", update_restic),
+            "3": ("Enable the daily backup timer", lambda: write_units(read_json(CONFIG_FILE, {}))),
+            "4": ("Status", show_status),
+            "5": ("Run backup now", lambda: subprocess.run(["systemctl", "start", "msp-backup.service"], check=True)),
+            "6": ("List snapshots", lambda: restic("snapshots")),
+            "7": ("Check repository", lambda: restic("check")),
+            "8": ("Restore snapshot", restore_snapshot),
+            "9": ("Mount snapshots", mount_snapshots),
+            "10": ("Unmount snapshots", unmount_snapshots),
+            "11": ("Apply retention and prune", prune_backups),
+            "12": ("Configure database backups", configure_database),
+            "13": ("Configure logs, SMTP, and updates", configure_menu),
+            "14": ("Check for MSP Backup updates", lambda: check_script_update(install=False)),
+            "15": ("Configure weekly MSP Backup auto-updates", install_script_update_timer),
         }
         while True:
-            print("\nMSP Backup — Backup Management")
+            print("\n" + "=" * 68)
+            print("MSP BACKUP  |  BACKUP MANAGEMENT")
+            print("=" * 68)
             print(" 1) Install/configure backups")
             print(" 2) Update Restic")
             print(" 3) Enable the daily backup timer")
@@ -341,14 +344,33 @@ class BackupWorkflowManager:
             print("13) Configure logs, SMTP, and updates")
             print("14) Check for MSP Backup updates")
             print("15) Configure weekly MSP Backup auto-updates")
+            print("-" * 68)
             choice = input("Action (0 to exit): ").strip()
             if choice == "0":
+                print("Exiting MSP Backup.")
                 return
-            action = actions.get(choice)
-            if action is None:
-                print("Invalid choice. Select an item from 0 to 15.")
+            selected = actions.get(choice)
+            if selected is None:
+                print("[INPUT ERROR] Invalid choice. Select an item from 0 to 15.")
                 continue
-            action()
+            label, action = selected
+            print("\n" + "-" * 68)
+            print(f"ACTION: {label}")
+            print("-" * 68)
+            try:
+                action()
+            except (BackupError, subprocess.CalledProcessError, OSError, ValueError) as exc:
+                if logger.handlers:
+                    logger.error("Action '%s' failed: %s", label, exc)
+                print("\n" + "!" * 68, file=sys.stderr)
+                print(f"ACTION FAILED: {label}", file=sys.stderr)
+                print(str(exc), file=sys.stderr)
+                print("Returning to the menu.", file=sys.stderr)
+                print("!" * 68, file=sys.stderr)
+            else:
+                print("-" * 68)
+                print(f"ACTION COMPLETE: {label}")
+                print("-" * 68)
 
 backup_workflows = BackupWorkflowManager()
 migrate_legacy_secrets = backup_workflows.migrate_legacy_secrets

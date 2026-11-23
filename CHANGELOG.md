@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.5
+
+- Added clear menu/action/result separators.
+- Kept the menu active and reported recoverable action errors without exiting.
+
 ## 1.1.4
 
 - Kept the interactive menu open after each action; `0` exits the menu.
