@@ -1,0 +1,342 @@
+"""MSP Backup: Restic, database dumps, logging, SMTP notifications and updates."""
+
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from .version import VERSION
+
+
+
+INSTALL_PATH = Path("/usr/local/sbin/msp-backup")
+
+ETC = Path("/etc/msp-backup")
+
+LOG_DIR = Path("/var/log/msp-backup")
+
+LOG_FILE = LOG_DIR / "msp-backup.log"
+
+LOGROTATE = Path("/etc/logrotate.d/msp-backup")
+
+DB_DUMP_DIR = Path("/run/msp-backup/db-dumps")
+
+SYSTEMD_DIR = Path("/etc/systemd/system")
+
+RESTIC_PASSWORD_CRED = ETC / "restic-password.cred"
+
+DB_PASSWORD_CRED = ETC / "database-password.cred"
+
+SMTP_PASSWORD_CRED = ETC / "smtp-password.cred"
+
+LEGACY_MYSQL_CRED = ETC / "database-mysql-config.cred"
+
+LEGACY_PGPASS_CRED = ETC / "database-pgpass.cred"
+
+BACKUP_TAG = "msp-backup"
+
+CONFIG_FILE = ETC / "config.json"
+
+DB_CONFIG_FILE = ETC / "database.json"
+
+SMTP_CONFIG_FILE = ETC / "notifications.json"
+
+UPDATE_CONFIG_FILE = ETC / "update.json"
+
+PATHS_FILE = ETC / "paths.txt"
+
+ENTRY_PATH = Path(sys.argv[0]).resolve()
+SCRIPT_DIR = ENTRY_PATH.parent.parent if ENTRY_PATH.name == "__main__.py" and ENTRY_PATH.parent.name == "msp_backup" else ENTRY_PATH.parent
+PACKAGE_DIR = Path(__file__).resolve().parent
+
+RESTIC_BIN = SCRIPT_DIR / "restic"
+
+RESTIC_API = "https://api.github.com/repos/restic/restic/releases/latest"
+
+logger = logging.getLogger("msp-backup")
+
+FAMILY = ""
+
+
+
+class BackupError(RuntimeError):
+    pass
+
+
+def get_family():
+    return FAMILY
+
+def info(message):
+    print(f"\n==> {message}", flush=True)
+    logger.info(message)
+
+
+def fail(message):
+    logger.error(message)
+    raise BackupError(message)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def input_default(prompt, default=""):
+    value = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
+    return value or default
+
+
+def input_positive_int(prompt, default, maximum=999):
+    value = input_default(prompt, str(default))
+    if not value.isdecimal() or not 1 <= int(value) <= maximum:
+        fail(f"Value must be between 1 and {maximum}.")
+    return int(value)
+
+
+def yes_no(prompt, default=False):
+    suffix = "[Y/n]" if default else "[y/N]"
+    value = input(f"{prompt} {suffix} ").strip().lower()
+    if not value:
+        return default
+    return value in ("y", "yes")
+
+class SystemManager:
+    """Manage system operations."""
+
+    def require_root(self):
+        if os.geteuid() != 0:
+            fail("Run this script with sudo or as root.")
+
+    def ensure_credential_support(self):
+        if not shutil.which("systemd-creds") or not shutil.which("systemd"):
+            fail("systemd-creds and systemd version 250 or later are required. Passwords will not be stored in plaintext.")
+        result = subprocess.run(["systemd", "--version"], capture_output=True, text=True)
+        match = re.search(r"systemd\s+(\d+)", result.stdout)
+        if not match or int(match.group(1)) < 250:
+            fail("systemd version 250 or later is required to encrypt secrets.")
+
+    def detect_family(self):
+        global FAMILY
+        data = {}
+        try:
+            for line in Path("/etc/os-release").read_text().splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    data[key] = value.strip('"')
+        except OSError as exc:
+            fail(f"Could not detect the Linux distribution: {exc}")
+        tokens = f"{data.get('ID', '')} {data.get('ID_LIKE', '')}".lower()
+        if any(name in tokens for name in ("debian", "ubuntu")):
+            FAMILY = "debian"
+        elif any(name in tokens for name in ("rhel", "fedora", "centos", "rocky", "almalinux", "ol")):
+            FAMILY = "rhel"
+        else:
+            fail(f"Unsupported distribution {data.get('PRETTY_NAME', 'unknown')}; Debian/Ubuntu or a RHEL-based system is required.")
+
+    def configure_logging(self):
+        LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chown(LOG_DIR, 0, 0)
+        os.chmod(LOG_DIR, 0o700)
+        LOG_FILE.touch(exist_ok=True)
+        os.chown(LOG_FILE, 0, 0)
+        os.chmod(LOG_FILE, 0o600)
+        logger.setLevel(logging.INFO)
+        handler = logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        if not LOGROTATE.exists() and shutil.which("logrotate"):
+            write_logrotate("daily", 14)
+
+    def write_logrotate(self, frequency="daily", count=14):
+        LOGROTATE.parent.mkdir(parents=True, exist_ok=True)
+        content = f"""{LOG_FILE} {{
+        {frequency}
+        rotate {count}
+        missingok
+        notifempty
+        compress
+        delaycompress
+        copytruncate
+        create 0600 root root
+    }}
+    """
+        LOGROTATE.write_text(content)
+        os.chmod(LOGROTATE, 0o644)
+
+    def run_stream(self, args, *, env=None, label=None, check=True):
+        logger.info("Starting %s", label or Path(args[0]).name)
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        assert process.stdout
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            logger.info(line.rstrip())
+        code = process.wait()
+        if code and check:
+            raise BackupError(f"Command exited with code {code}: {label or Path(args[0]).name}")
+        return code
+
+    def install_dependencies(self):
+        required = ["bzip2", "findmnt", "logrotate", "mountpoint"]
+        missing = [name for name in required if not shutil.which(name)]
+        if not shutil.which("fusermount3") and not shutil.which("fusermount"):
+            missing.append("FUSE (fusermount)")
+        if not missing:
+            return
+        print(f"Missing dependencies: {', '.join(missing)}")
+        if input("Install system utilities and FUSE now? [y/N] ").strip().lower() != "y":
+            fail("Dependencies were not installed.")
+        if FAMILY == "debian":
+            commands = [
+                ["apt-get", "update"],
+                ["apt-get", "install", "-y", "bzip2", "coreutils", "util-linux", "fuse3", "logrotate"],
+            ]
+        else:
+            manager = "dnf" if shutil.which("dnf") else "yum"
+            commands = [
+                [manager, "install", "-y", "bzip2", "coreutils", "util-linux", "logrotate"],
+                [manager, "install", "-y", "fuse3"],
+            ]
+        for command in commands:
+            code = run_stream(command, check=False)
+            if code and FAMILY == "rhel" and "fuse3" in command:
+                manager = "dnf" if shutil.which("dnf") else "yum"
+                run_stream([manager, "install", "-y", "fuse"], label="Install FUSE")
+            elif code:
+                fail(f"Could not install dependencies using {command[0]}.")
+        if not LOGROTATE.exists():
+            write_logrotate()
+        if not Path("/dev/fuse").exists() and shutil.which("modprobe"):
+            subprocess.run(["modprobe", "fuse"], check=False)
+
+    def secure_runfs(self):
+        try:
+            fs = subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", "--target", "/run"], text=True).strip()
+        except (OSError, subprocess.CalledProcessError):
+            fs = ""
+        if fs not in ("tmpfs", "ramfs"):
+            fail("/run is not tmpfs/ramfs; refusing to place decrypted secrets on disk.")
+
+system_manager = SystemManager()
+require_root = system_manager.require_root
+ensure_credential_support = system_manager.ensure_credential_support
+detect_family = system_manager.detect_family
+configure_logging = system_manager.configure_logging
+write_logrotate = system_manager.write_logrotate
+run_stream = system_manager.run_stream
+install_dependencies = system_manager.install_dependencies
+secure_runfs = system_manager.secure_runfs
+
+class CredentialStore:
+    """Manage credential operations."""
+
+    def runtime_dir(self):
+        secure_runfs()
+        return Path(tempfile.mkdtemp(prefix="msp-backup.", dir="/run"))
+
+    def remove_runtime(self, path):
+        if path and str(path).startswith("/run/msp-backup."):
+            shutil.rmtree(path, ignore_errors=True)
+
+    def encrypt_credential(self, name, plaintext, destination):
+        ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(ETC, 0o700)
+        result = subprocess.run(
+            ["systemd-creds", "encrypt", "--with-key=auto", f"--name={name}", "-", str(destination)],
+            input=plaintext,
+        )
+        if result.returncode:
+            fail(f"Could not encrypt secret {name}.")
+        os.chown(destination, 0, 0)
+        os.chmod(destination, 0o600)
+
+    def decrypt_credential(self, name, source, destination):
+        result = subprocess.run(["systemd-creds", "decrypt", f"--name={name}", str(source), str(destination)])
+        if result.returncode:
+            raise BackupError(f"Could not decrypt credential {name}.")
+        os.chmod(destination, 0o600)
+
+    def atomic_secret_file(self, path, content):
+        path.write_bytes(content)
+        os.chmod(path, 0o600)
+
+    def remove_old_secret(self, path):
+        if not path.is_file():
+            return
+        shred = shutil.which("shred")
+        if shred:
+            subprocess.run([shred, "-u", str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+credential_store = CredentialStore()
+runtime_dir = credential_store.runtime_dir
+remove_runtime = credential_store.remove_runtime
+encrypt_credential = credential_store.encrypt_credential
+decrypt_credential = credential_store.decrypt_credential
+atomic_secret_file = credential_store.atomic_secret_file
+remove_old_secret = credential_store.remove_old_secret
+
+class ConfigStore:
+    """Manage config operations."""
+
+    def save_json(self, path, data):
+        ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(ETC, 0o700)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        os.chown(path, 0, 0)
+
+    def read_json(self, path, default=None):
+        if not path.exists():
+            return default
+        try:
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            fail(f"Could not read {path}: {exc}")
+
+    def load_config(self):
+        config = read_json(CONFIG_FILE)
+        if not config or not config.get("repository"):
+            fail("Configure the repository first (menu item 1).")
+        if not RESTIC_PASSWORD_CRED.is_file() or not RESTIC_BIN.is_file():
+            fail("The encrypted password or local Restic binary was not found.")
+        return config
+
+config_store = ConfigStore()
+save_json = config_store.save_json
+read_json = config_store.read_json
+load_config = config_store.load_config
+
