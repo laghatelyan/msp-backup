@@ -11,7 +11,7 @@ import zipfile
 
 from .restic import download
 from pathlib import Path
-from .common import BackupError, INSTALL_PATH, PACKAGE_DIR, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_default, logger, read_json, run_stream, save_json, yes_no
+from .common import APP_SYSTEMD_DIR, BackupError, INSTALL_PATH, PACKAGE_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_default, link_systemd_unit, logger, read_json, run_stream, save_json, yes_no
 
 class UpdateManager:
     """Own updates configuration and operational workflows."""
@@ -139,10 +139,13 @@ class UpdateManager:
     [Install]
     WantedBy=timers.target
     """
-        (SYSTEMD_DIR / "msp-backup-update.service").write_text(service)
-        (SYSTEMD_DIR / "msp-backup-update.timer").write_text(timer)
-        os.chmod(SYSTEMD_DIR / "msp-backup-update.service", 0o644)
-        os.chmod(SYSTEMD_DIR / "msp-backup-update.timer", 0o644)
+        APP_SYSTEMD_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
+        for name, content in (("msp-backup-update.service", service), ("msp-backup-update.timer", timer)):
+            path = APP_SYSTEMD_DIR / name
+            path.write_text(content)
+            os.chown(path, 0, 0)
+            os.chmod(path, 0o644)
+            link_systemd_unit(path)
         run_stream(["systemctl", "daemon-reload"])
         run_stream(["systemctl", "enable", "--now", "msp-backup-update.timer"])
 

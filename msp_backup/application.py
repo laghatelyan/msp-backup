@@ -7,7 +7,7 @@ import sys
 import time
 
 
-from .common import BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LOGROTATE, LOG_FILE, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_PASSWORD_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, yes_no
+from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, yes_no
 from .common import BackupError, logger
 from .restic import ensure_restic, restic, restic_installer, restic_manager, update_restic
 from .database import configure_database, database_backup_manager
@@ -19,7 +19,7 @@ class BackupWorkflowManager:
 
     def migrate_legacy_secrets(self):
         ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
-        old_roots = [ETC, Path("/etc/restic-wizard")]
+        old_roots = [ETC, OLD_ETC, Path("/etc/restic-wizard")]
         simple = [("repository-password", RESTIC_PASSWORD_CRED, "msp-backup-restic"),
                   ("smtp-password", SMTP_PASSWORD_CRED, "msp-backup-smtp"),
                   ("mysql.cnf", LEGACY_MYSQL_CRED, "msp-backup-database-mysql-config"),
@@ -38,10 +38,55 @@ class BackupWorkflowManager:
             remove_old_secret(old_dump / filename)
 
     def import_legacy_config(self):
-        legacy_roots = [ETC, Path("/etc/restic-wizard")]
+        migrated = False
+        if OLD_ETC.is_dir():
+            ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
+            movable = (
+                "config.json", "database.json", "notifications.json", "update.json", "paths.txt",
+                "restic-password.cred", "database-password.cred", "smtp-password.cred",
+                "database-mysql-config.cred", "database-pgpass.cred", "credential.key",
+                "mount.path", "mount.pid", "mount.log",
+            )
+            for name in movable:
+                source = OLD_ETC / name
+                destination = ETC / name
+                if not source.is_file() or destination.exists():
+                    continue
+                if name == "paths.txt":
+                    content = source.read_text().replace("/var/lib/msp-backup/db-dumps", str(DB_DUMP_DIR))
+                    destination.write_text(content)
+                    source.unlink()
+                else:
+                    shutil.move(str(source), str(destination))
+                os.chown(destination, 0, 0)
+                os.chmod(destination, 0o600)
+                migrated = True
+        old_log_dir = Path("/var/log/msp-backup")
+        log_migration_marker = ETC / ".legacy-logs-imported"
+        if old_log_dir.is_dir() and not log_migration_marker.exists():
+            LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for source in old_log_dir.glob("msp-backup.log*"):
+                destination = LOG_DIR / source.name
+                if not source.is_file():
+                    continue
+                if source.name == LOG_FILE.name and destination.exists():
+                    with source.open("rb") as old_log, destination.open("ab") as new_log:
+                        shutil.copyfileobj(old_log, new_log)
+                    source.unlink()
+                    migrated = True
+                elif not destination.exists():
+                    shutil.move(str(source), str(destination))
+                    migrated = True
+                if destination.exists():
+                    os.chown(destination, 0, 0)
+                    os.chmod(destination, 0o600)
+            log_migration_marker.touch(mode=0o600, exist_ok=True)
+            os.chown(log_migration_marker, 0, 0)
+
+        legacy_roots = [ETC, OLD_ETC, Path("/etc/restic-wizard")]
         legacy = next((root for root in legacy_roots if (root / "config").is_file()), None)
         if CONFIG_FILE.exists() or legacy is None:
-            return False
+            return migrated
         ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Legacy shell config is parsed as data; it is never sourced or executed.
         values = {}
@@ -70,6 +115,7 @@ class BackupWorkflowManager:
             items = [line.replace("/var/lib/msp-backup/db-dumps", str(DB_DUMP_DIR)) for line in paths.read_text().splitlines() if line]
             PATHS_FILE.write_text("\n".join(items) + "\n")
             os.chmod(PATHS_FILE, 0o600)
+            paths.unlink()
         db_legacy = legacy / "database.conf"
         if db_legacy.exists():
             old_db = {}
@@ -88,6 +134,7 @@ class BackupWorkflowManager:
                 if old_db.get("DB_PATH"):
                     migrated_db["path"] = old_db["DB_PATH"]
                 save_json(DB_CONFIG_FILE, migrated_db)
+            db_legacy.unlink()
         notify_legacy = legacy / "notifications.conf"
         if notify_legacy.exists():
             old_notify = {}
@@ -101,6 +148,9 @@ class BackupWorkflowManager:
                           "auth": old_notify.get("SMTP_AUTH") == "1", "user": old_notify.get("SMTP_USER", ""),
                           "from": old_notify.get("SMTP_FROM", ""), "to": old_notify.get("SMTP_TO", ""),
                           "mode": old_notify.get("NOTIFY_MODE", "failures")})
+            notify_legacy.unlink()
+        if old_config.exists():
+            old_config.unlink()
         info("Legacy MSP Backup configuration imported; review the settings before running.")
         subprocess.run(["systemctl", "disable", "--now", "restic-backup.timer", "restic-update.timer"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
@@ -143,11 +193,18 @@ class BackupWorkflowManager:
     Type=oneshot
     ExecStart={INSTALL_PATH} --notify-failure
     """
-        (SYSTEMD_DIR / "msp-backup.service").write_text(service)
-        (SYSTEMD_DIR / "msp-backup.timer").write_text(timer)
-        (SYSTEMD_DIR / "msp-backup-notify-failure.service").write_text(failure)
-        for path in (SYSTEMD_DIR / "msp-backup.service", SYSTEMD_DIR / "msp-backup.timer", SYSTEMD_DIR / "msp-backup-notify-failure.service"):
+        APP_SYSTEMD_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
+        units = {
+            "msp-backup.service": service,
+            "msp-backup.timer": timer,
+            "msp-backup-notify-failure.service": failure,
+        }
+        for name, content in units.items():
+            path = APP_SYSTEMD_DIR / name
+            path.write_text(content)
             os.chmod(path, 0o644)
+            os.chown(path, 0, 0)
+            link_systemd_unit(path)
         run_stream(["systemctl", "daemon-reload"])
         run_stream(["systemctl", "enable", "--now", "msp-backup.timer"])
 
@@ -409,7 +466,7 @@ class BackupApplication:
             current = launcher
         if current == INSTALL_PATH:
             return False
-        INSTALL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        INSTALL_PATH.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         shutil.copy2(current, INSTALL_PATH)
         package_temp = INSTALL_PATH.parent / "msp_backup.new"
         if package_temp.exists():
@@ -429,8 +486,14 @@ class BackupApplication:
             raise
         if package_previous.exists():
             shutil.rmtree(package_previous)
+        os.chown(APP_DIR, 0, 0)
+        os.chmod(APP_DIR, 0o755)
         os.chown(INSTALL_PATH, 0, 0)
         os.chmod(INSTALL_PATH, 0o755)
+        if LEGACY_RESTIC_BIN.is_file() and not RESTIC_INSTALL_BIN.exists():
+            shutil.move(str(LEGACY_RESTIC_BIN), str(RESTIC_INSTALL_BIN))
+            os.chown(RESTIC_INSTALL_BIN, 0, 0)
+            os.chmod(RESTIC_INSTALL_BIN, 0o755)
         os.execv(str(INSTALL_PATH), [str(INSTALL_PATH), *self.argv])
         return True
 
@@ -469,6 +532,8 @@ class BackupApplication:
         self.workflows.migrate_legacy_secrets()
         if imported and RESTIC_BIN.exists() and RESTIC_PASSWORD_CRED.exists() and CONFIG_FILE.exists() and PATHS_FILE.exists():
             self.workflows.write_units(self.config.read_json(CONFIG_FILE, {}))
+        if imported and self.config.read_json(UPDATE_CONFIG_FILE, {}).get("manifest_url") and (SYSTEMD_DIR / "msp-backup-update.timer").exists():
+            self.updates.install_script_update_timer()
         if self.dispatch_system_action():
             return 0
         if self.argv:

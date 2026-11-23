@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+- Relocated the application, Restic binary, configuration, credentials, and logs under `/opt/msp-backup/`.
+- Kept systemd and logrotate integration files under `/opt` and linked them into their system search paths.
+- Added migration of existing configuration, credentials, logs, Restic binary, and timers.
+
 ## 1.2.0
 
 - Added a Python Fernet credential backend for systems without systemd-creds 250+.

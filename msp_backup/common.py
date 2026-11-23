@@ -14,15 +14,21 @@ from .version import VERSION
 
 
 
-INSTALL_PATH = Path("/usr/local/sbin/msp-backup")
+APP_DIR = Path("/opt/msp-backup")
+INSTALL_PATH = APP_DIR / "msp-backup"
+RESTIC_INSTALL_BIN = APP_DIR / "restic"
+LEGACY_RESTIC_BIN = Path("/usr/local/sbin/restic")
 
-ETC = Path("/etc/msp-backup")
+ETC = APP_DIR / "data"
+OLD_ETC = Path("/etc/msp-backup")
 
-LOG_DIR = Path("/var/log/msp-backup")
+LOG_DIR = APP_DIR / "logs"
 
 LOG_FILE = LOG_DIR / "msp-backup.log"
 
 LOGROTATE = Path("/etc/logrotate.d/msp-backup")
+APP_SYSTEMD_DIR = APP_DIR / "systemd"
+LOGROTATE_CONFIG = APP_SYSTEMD_DIR / "msp-backup.logrotate"
 
 DB_DUMP_DIR = Path("/run/msp-backup/db-dumps")
 
@@ -72,6 +78,25 @@ class BackupError(RuntimeError):
 
 def get_family():
     return FAMILY
+
+
+def link_systemd_unit(source):
+    source = Path(source)
+    SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
+    destination = SYSTEMD_DIR / source.name
+    if destination.is_symlink() and destination.resolve() == source.resolve():
+        return
+    if destination.is_symlink():
+        destination.unlink()
+    elif destination.exists():
+        try:
+            previous = destination.read_text(errors="replace")
+        except OSError as exc:
+            fail(f"Could not inspect existing systemd unit {destination}: {exc}")
+        if "MSP Backup" not in previous:
+            fail(f"Refusing to replace unrelated systemd unit: {destination}")
+        destination.unlink()
+    destination.symlink_to(source.resolve())
 
 def info(message):
     print(f"\n==> {message}", flush=True)
@@ -187,11 +212,22 @@ class SystemManager:
         handler = logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
-        if not LOGROTATE.exists() and shutil.which("logrotate"):
+        if (not LOGROTATE.is_symlink() or not LOGROTATE.exists()) and shutil.which("logrotate"):
             write_logrotate("daily", 14)
 
     def write_logrotate(self, frequency="daily", count=14):
-        LOGROTATE.parent.mkdir(parents=True, exist_ok=True)
+        if LOGROTATE.is_file() and not LOGROTATE.is_symlink():
+            try:
+                legacy = LOGROTATE.read_text()
+                old_frequency = re.search(r"^\s*(daily|weekly|monthly)\s*$", legacy, re.M)
+                old_count = re.search(r"^\s*rotate\s+(\d+)\s*$", legacy, re.M)
+                if frequency == "daily" and old_frequency:
+                    frequency = old_frequency.group(1)
+                if count == 14 and old_count:
+                    count = min(365, max(1, int(old_count.group(1))))
+            except OSError:
+                pass
+        APP_SYSTEMD_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
         content = f"""{LOG_FILE} {{
         {frequency}
         rotate {count}
@@ -203,8 +239,15 @@ class SystemManager:
         create 0600 root root
     }}
     """
-        LOGROTATE.write_text(content)
-        os.chmod(LOGROTATE, 0o644)
+        LOGROTATE_CONFIG.write_text(content)
+        os.chown(LOGROTATE_CONFIG, 0, 0)
+        os.chmod(LOGROTATE_CONFIG, 0o644)
+        if LOGROTATE.is_symlink():
+            LOGROTATE.unlink()
+        elif LOGROTATE.exists():
+            LOGROTATE.unlink()
+        LOGROTATE.parent.mkdir(parents=True, exist_ok=True)
+        LOGROTATE.symlink_to(LOGROTATE_CONFIG)
 
     def run_stream(self, args, *, env=None, label=None, check=True):
         logger.info("Starting %s", label or Path(args[0]).name)
