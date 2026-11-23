@@ -156,16 +156,22 @@ class TerminalUI:
 
         selected = max(0, min(initial, len(options) - 1))
         keys = {str(option[0]) for option in options}
+        visible_count = max(5, shutil.get_terminal_size((80, 24)).lines - 7)
         while True:
             self.header(title, subtitle)
-            for index, (key, label, *rest) in enumerate(options):
+            start = min(max(selected - visible_count + 1, 0), max(0, len(options) - visible_count))
+            end = min(len(options), start + visible_count)
+            for index in range(start, end):
+                key, label, *rest = options[index]
                 description = rest[0] if rest else ""
                 marker = self.paint("❯", "cyan", "bold") if index == selected else " "
                 line = f" {marker} {self.paint(str(key).rjust(2), 'cyan', 'bold')}  {label}"
                 if description:
                     line += f"  {self.paint(description, 'muted')}"
                 print(line)
-            print(f"\n{self.paint('↑/↓', 'cyan', 'bold')} navigate   {self.paint('Enter', 'cyan', 'bold')} select   {self.paint('0/Esc', 'cyan', 'bold')} back")
+            if len(options) > visible_count:
+                print(f"\nShowing {start + 1}–{end} of {len(options)}")
+            print(f"{self.paint('↑/↓ ←/→', 'cyan', 'bold')} navigate   {self.paint('Enter', 'cyan', 'bold')} select   {self.paint('PgUp/PgDn', 'cyan', 'bold')} page   {self.paint('0/Esc', 'cyan', 'bold')} back")
             key = self._read_key()
             if key in ("\x1b[A", "\x1bOA"):
                 selected = (selected - 1) % len(options)
@@ -181,6 +187,14 @@ class TerminalUI:
                 selected = (selected + 1) % len(options)
             elif key in ("\x1b[D", "\x1bOD"):
                 selected = (selected - 1) % len(options)
+            elif key == "\x1b[5~":
+                selected = max(0, selected - visible_count)
+            elif key == "\x1b[6~":
+                selected = min(len(options) - 1, selected + visible_count)
+            elif key in ("\x1b[H", "\x1b[1~"):
+                selected = 0
+            elif key in ("\x1b[F", "\x1b[4~"):
+                selected = len(options) - 1
 
     def pause(self, prompt="Press any key to continue"):
         if self.interactive:

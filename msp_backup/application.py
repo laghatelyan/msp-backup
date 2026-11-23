@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime
+import posixpath
 from urllib.parse import urlsplit
 import json
 import getpass
@@ -480,20 +482,250 @@ class BackupWorkflowManager:
         config = load_config()
         restic("forget", "--tag", BACKUP_TAG, "--keep-daily", str(config["daily"]), "--keep-weekly", str(config["weekly"]), "--keep-monthly", str(config["monthly"]), "--prune")
 
+    def load_snapshots(self):
+        try:
+            output = restic("snapshots", "--json", quiet=True, capture_output=True)
+            snapshots = json.loads(output or "[]")
+        except (BackupError, json.JSONDecodeError) as exc:
+            fail(f"Could not read the snapshot list: {exc}")
+        if snapshots is None:
+            return []
+        if not isinstance(snapshots, list):
+            fail("Restic returned an invalid snapshot list.")
+        snapshots = [snapshot for snapshot in snapshots if isinstance(snapshot, dict) and snapshot.get("id")]
+
+        def snapshot_time(snapshot):
+            try:
+                value = snapshot.get("time", "").replace("Z", "+00:00")
+                return datetime.fromisoformat(value).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        return sorted(snapshots, key=snapshot_time, reverse=True)
+
+    @staticmethod
+    def snapshot_label(snapshot):
+        timestamp = str(snapshot.get("time") or "unknown time").replace("T", " ")[:19]
+        identifier = snapshot.get("short_id") or str(snapshot.get("id", "unknown"))[:8]
+        hostname = snapshot.get("hostname") or "unknown host"
+        return f"{timestamp}  ·  {hostname}  ·  {identifier}"
+
+    def select_snapshot(self):
+        snapshots = self.load_snapshots()
+        if not snapshots:
+            ui.status("No snapshots are available in this repository.", "warning")
+            return None
+        options = []
+        for index, snapshot in enumerate(snapshots, start=1):
+            paths = ", ".join(str(path) for path in snapshot.get("paths", []))
+            if len(paths) > 88:
+                paths = paths[:85] + "…"
+            options.append((str(index), self.snapshot_label(snapshot), paths))
+        options.append(("0", "Back"))
+        choice = ui.select("RESTORE · SELECT SNAPSHOT", options, "Newest snapshots are listed first. Use arrows and Enter.")
+        if choice in (None, "0"):
+            return None
+        try:
+            return snapshots[int(choice) - 1]
+        except (ValueError, IndexError):
+            fail("Invalid snapshot selection.")
+
+    def list_snapshots(self):
+        while True:
+            snapshot = self.select_snapshot()
+            if snapshot is None:
+                return
+            if not self.snapshot_restore_actions(snapshot):
+                return
+
     def restore_snapshot(self):
-        restic("snapshots")
-        snapshot = input("Snapshot ID (or latest): ").strip()
-        target = Path(input("Absolute destination directory: ").strip())
-        if not snapshot or not target.is_absolute() or target == Path("/"):
-            fail("Invalid snapshot or destination directory.")
-        if not yes_no("Restore may overwrite existing files. Continue?"):
-            return
-        subpath = input("Path within the snapshot (press Enter for the entire snapshot): ").strip()
+        while True:
+            snapshot = self.select_snapshot()
+            if snapshot is None:
+                return
+            if not self.snapshot_restore_actions(snapshot):
+                return
+
+    def snapshot_restore_actions(self, snapshot):
+        snapshot_id = snapshot.get("id")
+        if not snapshot_id:
+            fail("The selected snapshot has no ID.")
+        paths = ", ".join(snapshot.get("paths", []))
+        if len(paths) > 120:
+            paths = paths[:117] + "…"
+        while True:
+            choice = ui.select("SNAPSHOT ACTIONS", [
+                ("1", "Restore the entire snapshot"),
+                ("2", "Choose individual files and folders"),
+                ("3", "Choose another snapshot"),
+                ("0", "Back to the main menu"),
+            ], f"{self.snapshot_label(snapshot)}  ·  {paths}")
+            if choice in (None, "0"):
+                return False
+            if choice == "3":
+                return True
+            if choice == "1":
+                if self.restore_snapshot_to(snapshot_id):
+                    ui.pause("Restore finished; press any key to return to snapshots")
+                    return True
+            elif choice == "2":
+                if self.restore_selected_items(snapshot_id):
+                    ui.pause("Restore finished; press any key to return to snapshots")
+                    return True
+
+    def restore_target(self):
+        while True:
+            value = input("Absolute destination directory (0 to cancel): ").strip()
+            if value == "0":
+                return None
+            try:
+                return self.validate_restore_target(value)
+            except ValueError as exc:
+                ui.status(f"{exc} Please try again.", "error")
+
+    @staticmethod
+    def validate_restore_target(value):
+        target = Path(value.strip())
+        if not target.is_absolute() or target == Path("/"):
+            raise ValueError("Enter an absolute destination other than /.")
+        return target
+
+    def restore_snapshot_to(self, snapshot_id, include_paths=None):
+        target = self.restore_target()
+        if target is None:
+            return False
+        if include_paths:
+            summary = f"{len(include_paths)} selected file/folder path(s)"
+        else:
+            summary = "the entire snapshot"
+        ui.section("Restore plan")
+        print(f"Snapshot: {snapshot_id}")
+        print(f"Scope:    {summary}")
+        print(f"Target:   {target}")
+        if not yes_no("Restored files may overwrite files in the target. Continue?", default=False):
+            return False
         target.mkdir(parents=True, exist_ok=True)
-        args = ["restore", snapshot, "--target", str(target)]
-        if subpath:
-            args += ["--include", "/" + subpath.lstrip("/")]
+        args = ["restore", snapshot_id, "--target", str(target)]
+        if include_paths:
+            patterns = [self.restic_include_pattern(path) for path in include_paths]
+            estimated_size = sum(len(pattern.encode("utf-8")) + 32 for pattern in patterns)
+            if estimated_size > 48000:
+                if any("\n" in path or "\r" in path or path != path.strip() for path in include_paths):
+                    fail("Too many selected paths include line breaks or edge spaces. Reduce the selection and retry.")
+                work = credential_store.runtime_dir()
+                try:
+                    include_file = work / "restore-includes.txt"
+                    file_patterns = [self.restic_include_pattern(path, include_file=True) for path in include_paths]
+                    include_file.write_text("\n".join(file_patterns) + "\n", encoding="utf-8")
+                    os.chmod(include_file, 0o600)
+                    args.extend(["--include-file", str(include_file)])
+                    restic(*args)
+                finally:
+                    credential_store.remove_runtime(work)
+                return True
+            for pattern in patterns:
+                args.extend(["--include", pattern])
         restic(*args)
+        return True
+
+    @staticmethod
+    def restic_include_pattern(path, *, include_file=False):
+        # Escape glob syntax so the exact path selected by the user is restored.
+        pattern = path.replace("\\", "\\\\").replace("[", "\\[").replace("*", "\\*").replace("?", "\\?")
+        if pattern.startswith("!"):
+            pattern = "\\" + pattern
+        if include_file:
+            pattern = pattern.replace("$", "$$")
+            if pattern.startswith("#"):
+                pattern = "\\" + pattern
+        return pattern
+
+    @staticmethod
+    def format_size(size):
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            return ""
+        units = ("B", "KiB", "MiB", "GiB", "TiB")
+        value = float(size)
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024
+
+    def load_snapshot_nodes(self, snapshot_id):
+        output = restic("ls", "--json", snapshot_id, quiet=True, capture_output=True)
+        nodes = []
+        for line in output.splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("struct_type", record.get("message_type")) != "node":
+                continue
+            path = record.get("path") or record.get("name")
+            if not isinstance(path, str) or not path:
+                continue
+            if not path.startswith("/"):
+                path = "/" + path
+            path = posixpath.normpath(path)
+            if path == "/":
+                continue
+            record["path"] = path
+            nodes.append(record)
+        nodes.sort(key=lambda node: (node["path"].casefold(), node.get("type", "")))
+        if not nodes:
+            ui.status("This snapshot contains no browsable file entries.", "warning")
+        return nodes
+
+    def restore_selected_items(self, snapshot_id):
+        nodes = self.load_snapshot_nodes(snapshot_id)
+        if not nodes:
+            return False
+        selected = set()
+        while True:
+            options = []
+            for index, node in enumerate(nodes, start=1):
+                path = node["path"]
+                kind = "DIR" if node.get("type") == "dir" else str(node.get("type", "FILE")).upper()
+                mark = "✓" if path in selected else " "
+                size = self.format_size(node.get("size"))
+                detail = f"{kind} · {size}" if size else kind
+                display_path = path.replace("\n", "\\n").replace("\r", "\\r")
+                options.append((str(index), f"[{mark}] {display_path}", detail))
+            options.extend([
+                ("d", f"Restore selected items ({len(selected)} selected)"),
+                ("c", "Clear selection"),
+                ("0", "Cancel and return"),
+            ])
+            choice = ui.select("SELECT RESTORE ITEMS", options, "Enter toggles a file/folder. A selected folder restores its contents.")
+            if choice in (None, "0"):
+                return False
+            if choice == "c":
+                selected.clear()
+                continue
+            if choice == "d":
+                if not selected:
+                    ui.status("Select at least one file or folder first.", "warning")
+                    continue
+                paths = self.collapse_selected_paths(selected)
+                return self.restore_snapshot_to(snapshot_id, paths)
+            if choice.isdecimal():
+                index = int(choice) - 1
+                if 0 <= index < len(nodes):
+                    path = nodes[index]["path"]
+                    if path in selected:
+                        selected.remove(path)
+                    else:
+                        selected.add(path)
+
+    @staticmethod
+    def collapse_selected_paths(paths):
+        result = []
+        for path in sorted(paths, key=lambda value: (value.count("/"), value)):
+            if not any(parent == "/" or path.startswith(parent.rstrip("/") + "/") for parent in result):
+                result.append(path)
+        return result
 
     def mount_worker(self, target):
         target_path = Path(target)
@@ -578,9 +810,9 @@ class BackupWorkflowManager:
             "3": ("Enable the daily backup timer", lambda: write_units(read_json(CONFIG_FILE, {}))),
             "4": ("Status", show_status),
             "5": ("Run backup now", lambda: subprocess.run(["systemctl", "start", "msp-backup.service"], check=True)),
-            "6": ("List snapshots", lambda: restic("snapshots")),
+            "6": ("List snapshots / restore selected items", self.list_snapshots),
             "7": ("Check repository", lambda: restic("check")),
-            "8": ("Restore snapshot", restore_snapshot),
+            "8": ("Restore snapshot / selected files", self.restore_snapshot),
             "9": ("Mount snapshots", mount_snapshots),
             "10": ("Unmount snapshots", unmount_snapshots),
             "11": ("Apply retention and prune", prune_backups),

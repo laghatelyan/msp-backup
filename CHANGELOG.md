@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.0
+
+- Added an interactive snapshot browser with newest snapshots first.
+- Added restore of a whole snapshot or selected files and folders from the chosen snapshot.
+- Added a persistent restore plan and confirmation before writing restored files.
+- Added paging for long terminal menus and a clear-selection action in the item picker.
+
 ## 1.6.0
 
 - Added arrow-key navigation for interactive terminal menus and confirmation dialogs.

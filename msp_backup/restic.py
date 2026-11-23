@@ -19,8 +19,9 @@ class ResticManager:
         self.binary = Path(binary)
         self.password_credential = Path(password_credential)
 
-    def run(self, *args, check=True, quiet=False):
+    def run(self, *args, check=True, quiet=False, capture_output=False):
         config = load_config()
+        quiet = quiet or capture_output
         if quiet:
             ui.status(f"Running Restic {args[0]}…", "running")
         work = runtime_dir()
@@ -58,6 +59,13 @@ class ResticManager:
             command = [str(self.binary), *args]
             if quiet:
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
+                if capture_output:
+                    if result.returncode:
+                        ui.status(f"Restic {args[0]} failed.", "error")
+                        detail = result.stderr.strip() or f"exit code {result.returncode}"
+                        raise BackupError(f"Restic {args[0]} failed: {detail}")
+                    ui.status(f"Restic {args[0]} finished.", "success")
+                    return result.stdout
                 if result.returncode and not check:
                     ui.status(f"Restic {args[0]} finished with errors.", "error")
                     return result.returncode
@@ -79,8 +87,8 @@ class ResticManager:
 restic_manager = ResticManager()
 
 
-def restic(*args, check=True, quiet=False):
-    return restic_manager.run(*args, check=check, quiet=quiet)
+def restic(*args, check=True, quiet=False, capture_output=False):
+    return restic_manager.run(*args, check=check, quiet=quiet, capture_output=capture_output)
 
 class ResticInstaller:
     """Install, update, and inspect the Restic executable."""
