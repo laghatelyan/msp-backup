@@ -36,7 +36,7 @@ class ResticManager:
             os.chmod(RESTIC_CACHE_DIR, 0o700)
             env["XDG_CACHE_HOME"] = str(RESTIC_CACHE_DIR)
             if config["repository"].startswith("s3:") and config.get("backend") != "s3":
-                fail("This S3 repository has no saved credentials. Configure repository / S3 credentials from the menu.")
+                fail("This S3 repository has no saved credentials. Configure them in Settings → Repository / S3 settings.")
             if config.get("backend") == "s3":
                 if not S3_CREDENTIALS_CRED.is_file():
                     fail("S3 credentials are missing. Configure S3 storage from the menu.")

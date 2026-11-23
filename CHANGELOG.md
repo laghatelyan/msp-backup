@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.0
+
+- Removed duplicate snapshot restore and repository settings entries from the main menu.
+- Grouped repository checks, snapshot mount/unmount, and retention under Snapshot tools.
+- Grouped daily backup and weekly application update schedules under Schedules.
+- Simplified the main menu to ten actions and updated the update URL hint.
+
 ## 1.7.0
 
 - Added an interactive snapshot browser with newest snapshots first.

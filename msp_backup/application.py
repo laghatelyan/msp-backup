@@ -538,14 +538,6 @@ class BackupWorkflowManager:
             if not self.snapshot_restore_actions(snapshot):
                 return
 
-    def restore_snapshot(self):
-        while True:
-            snapshot = self.select_snapshot()
-            if snapshot is None:
-                return
-            if not self.snapshot_restore_actions(snapshot):
-                return
-
     def snapshot_restore_actions(self, snapshot):
         snapshot_id = snapshot.get("id")
         if not snapshot_id:
@@ -803,32 +795,52 @@ class BackupWorkflowManager:
         elif choice == "4":
             self.configure_repository()
 
+    def snapshot_tools_menu(self):
+        actions = {
+            "1": ("Check repository", lambda: restic("check")),
+            "2": ("Mount snapshots", mount_snapshots),
+            "3": ("Unmount snapshots", unmount_snapshots),
+            "4": ("Apply retention and prune", prune_backups),
+        }
+        self.run_submenu("SNAPSHOT TOOLS", actions)
+
+    def schedule_menu(self):
+        actions = {
+            "1": ("Enable the daily backup timer", lambda: write_units(read_json(CONFIG_FILE, {}))),
+            "2": ("Configure weekly MSP Backup auto-updates", install_script_update_timer),
+        }
+        self.run_submenu("SCHEDULES", actions)
+
+    def run_submenu(self, title, actions):
+        options = [(key, label) for key, (label, _) in actions.items()]
+        options.append(("0", "Back to main menu"))
+        while True:
+            choice = ui.select(title, options, "Use ↑/↓ or left/right, then Enter.")
+            if choice in (None, "0"):
+                return
+            selected = actions.get(choice)
+            if selected is None:
+                continue
+            label, action = selected
+            ui.header(label.upper(), "Action in progress")
+            action()
+            ui.status(f"{label} completed.", "success")
+            ui.pause("Review the output; press any key to return")
+
     def menu(self):
         actions = {
             "1": ("Install/configure backups", lambda: (ensure_restic(), setup_backup())),
-            "2": ("Update Restic", update_restic),
-            "3": ("Enable the daily backup timer", lambda: write_units(read_json(CONFIG_FILE, {}))),
-            "4": ("Status", show_status),
-            "5": ("Run backup now", lambda: subprocess.run(["systemctl", "start", "msp-backup.service"], check=True)),
-            "6": ("List snapshots / restore selected items", self.list_snapshots),
-            "7": ("Check repository", lambda: restic("check")),
-            "8": ("Restore snapshot / selected files", self.restore_snapshot),
-            "9": ("Mount snapshots", mount_snapshots),
-            "10": ("Unmount snapshots", unmount_snapshots),
-            "11": ("Apply retention and prune", prune_backups),
-            "12": ("Configure database backups", configure_database),
-            "13": ("Configure logs, SMTP, and updates", configure_menu),
-            "14": ("Check for MSP Backup updates", lambda: check_script_update(install=False)),
-            "15": ("Configure weekly MSP Backup auto-updates", install_script_update_timer),
-            "16": ("Configure repository / S3 credentials", self.configure_repository),
+            "2": ("Run backup now", lambda: subprocess.run(["systemctl", "start", "msp-backup.service"], check=True)),
+            "3": ("Browse snapshots and restore", self.list_snapshots),
+            "4": ("Snapshot tools", self.snapshot_tools_menu),
+            "5": ("Configure database backups", configure_database),
+            "6": ("Schedules", self.schedule_menu),
+            "7": ("Settings", configure_menu),
+            "8": ("Update Restic", update_restic),
+            "9": ("Check for MSP Backup updates", lambda: check_script_update(install=False)),
+            "10": ("Status", show_status),
         }
-        menu_options = []
-        for key, (label, _) in actions.items():
-            description = {
-                "1": "repository, password, paths, schedule",
-                "16": "configure storage and S3 credentials",
-            }.get(key, "")
-            menu_options.append((key, label, description))
+        menu_options = [(key, label) for key, (label, _) in actions.items()]
         menu_options.append(("0", "Exit"))
         while True:
             choice = ui.select("MSP BACKUP", menu_options, f"Backup management  ·  Version {VERSION}  ·  Navigate with arrow keys")
@@ -867,7 +879,6 @@ write_units = backup_workflows.write_units
 setup_backup = backup_workflows.setup_backup
 run_backup = backup_workflows.run_backup
 prune_backups = backup_workflows.prune_backups
-restore_snapshot = backup_workflows.restore_snapshot
 mount_worker = backup_workflows.mount_worker
 mount_snapshots = backup_workflows.mount_snapshots
 unmount_snapshots = backup_workflows.unmount_snapshots

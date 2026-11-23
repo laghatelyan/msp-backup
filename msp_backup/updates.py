@@ -37,7 +37,7 @@ class UpdateManager:
         manifest_url = config.get("manifest_url")
         if not manifest_url:
             if not quiet:
-                print("Update URL is not configured (menu item 15).")
+                print("Update URL is not configured (Settings → Update URL).")
             return False
         try:
             manifest = json.loads(download(manifest_url).decode("utf-8"))
