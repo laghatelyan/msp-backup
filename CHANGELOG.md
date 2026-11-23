@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- Finalized package installation and update handling for the modular release.
+- Added the project architecture overview to the Russian operator guide.
+
 ## 1.1.0
 
 - Refactored the utility into the `msp_backup` Python package with service managers for system operations, configuration, credentials, Restic, databases, notifications, and updates.

@@ -378,6 +378,9 @@ class BackupApplication:
 
     def install_self(self):
         current = Path(sys.argv[0]).resolve()
+        launcher = PACKAGE_DIR.parent / "msp-backup.py"
+        if current.name == "__main__.py" and launcher.is_file():
+            current = launcher
         if current == INSTALL_PATH:
             return False
         INSTALL_PATH.parent.mkdir(parents=True, exist_ok=True)
