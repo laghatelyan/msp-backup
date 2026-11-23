@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 
-from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, VERSION, decrypt_credential, fail, info, load_config, logger, remove_runtime, run_stream, runtime_dir
+from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, VERSION, decrypt_credential, fail, info, load_config, logger, remove_runtime, run_stream, runtime_dir, ui
 
 class ResticManager:
     """Run Restic with repository credentials kept in memory-backed storage."""
@@ -21,6 +21,8 @@ class ResticManager:
 
     def run(self, *args, check=True, quiet=False):
         config = load_config()
+        if quiet:
+            ui.status(f"Running Restic {args[0]}…", "running")
         work = runtime_dir()
         try:
             password = work / "restic-password"
@@ -53,6 +55,7 @@ class ResticManager:
             if quiet:
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
                 if result.returncode and not check:
+                    ui.status(f"Restic {args[0]} finished with errors.", "error")
                     return result.returncode
                 if result.stdout:
                     print(result.stdout, end="")
@@ -61,7 +64,9 @@ class ResticManager:
                     print(result.stderr, end="", file=sys.stderr)
                     logger.warning(result.stderr.rstrip())
                 if check and result.returncode:
+                    ui.status(f"Restic {args[0]} failed.", "error")
                     raise BackupError(f"Restic exited with code {result.returncode}.")
+                ui.status(f"Restic {args[0]} finished.", "success")
                 return result.returncode
             return run_stream(command, env=env, check=check, label=f"restic {args[0]}")
         finally:

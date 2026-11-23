@@ -3,13 +3,15 @@ from urllib.parse import urlsplit
 import json
 import getpass
 import os
+import re
+import secrets
 import shutil
 import subprocess
 import sys
 import time
 
 
-from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, yes_no
+from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, ui, yes_no
 from .common import BackupError, logger
 from .restic import ensure_restic, restic, restic_installer, restic_manager, update_restic
 from .database import configure_database, database_backup_manager
@@ -18,6 +20,47 @@ from .updates import check_script_update, configure_update_url, install_script_u
 
 class BackupWorkflowManager:
     """Own setup, backup, restore, mount, and interactive workflows."""
+
+    def ask_until_valid(self, prompt, validator, *, default=None, secret=False):
+        while True:
+            suffix = f" [{default}]" if default is not None else ""
+            value = getpass.getpass(f"{prompt}{suffix}: ") if secret else input(f"{prompt}{suffix}: ")
+            if not value and default is not None:
+                value = str(default)
+            try:
+                return validator(value)
+            except (BackupError, ValueError, OSError) as exc:
+                ui.status(f"{exc} Please try again.", "error")
+
+    @staticmethod
+    def choice_validator(choices, message="Choose one of the listed options."):
+        def validate(value):
+            if value not in choices:
+                raise ValueError(message)
+            return value
+        return validate
+
+    @staticmethod
+    def validate_region(value):
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9-]+", value):
+            raise ValueError("Enter a valid region.")
+        return value
+
+    @staticmethod
+    def validate_endpoint(value):
+        endpoint = value.strip().rstrip("/")
+        parsed = urlsplit(endpoint)
+        if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Enter an S3 endpoint URL such as https://s3.example.com.")
+        return endpoint, parsed.scheme
+
+    @staticmethod
+    def validate_bucket(value):
+        value = value.strip()
+        if not value or any(char.isspace() for char in value) or "/" in value:
+            raise ValueError("Enter a bucket name without spaces or slashes.")
+        return value
 
     def migrate_legacy_secrets(self):
         ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -211,45 +254,47 @@ class BackupWorkflowManager:
         run_stream(["systemctl", "enable", "--now", "msp-backup.timer"])
 
     def collect_repository_settings(self):
-        print("Repository type:")
-        print(" 1) Local path or another Restic backend (SFTP, REST, etc.)")
-        print(" 2) Amazon S3")
-        print(" 3) S3-compatible storage (Wasabi, Backblaze, MinIO, etc.)")
-        choice = input("Select repository type [1]: ").strip() or "1"
+        current = read_json(CONFIG_FILE, {})
+        current_repo = current.get("repository", "")
+        current_s3 = current.get("backend") == "s3" or current_repo.startswith("s3:")
+        saved_endpoint = current.get("s3_endpoint", "")
+        if current_s3:
+            default_type = "2" if current_repo.startswith("s3:s3.") and not saved_endpoint.startswith(("http://", "https://")) else "3"
+        else:
+            default_type = "1"
+        ui.section("Repository backend")
+        print("  1  Local path or another Restic backend (SFTP, REST, etc.)")
+        print("  2  Amazon S3")
+        print("  3  S3-compatible storage (Wasabi, Backblaze, MinIO, etc.)")
+        choice = self.ask_until_valid("Select repository type", self.choice_validator({"1", "2", "3"}, "Enter 1, 2, or 3."), default=default_type)
         if choice == "1":
-            repository = input("Restic repository (local path or backend): ").strip()
-            if not repository or "'" in repository or "\n" in repository or repository.startswith("s3:"):
-                fail("Enter a valid repository address; select an S3 option for S3 storage.")
-            local_repo = None
-            if repository.startswith("/"):
-                local_repo = Path(os.path.realpath(repository))
-                if local_repo == Path("/"):
-                    fail("The filesystem root / cannot be used as a repository.")
-                local_repo.mkdir(mode=0o700, parents=True, exist_ok=True)
-                os.chown(local_repo, 0, 0)
-                os.chmod(local_repo, 0o700)
-                repository = str(local_repo)
+            def validate_repository(value):
+                value = value.strip()
+                if not value or "'" in value or "\n" in value or value.startswith("s3:"):
+                    raise ValueError("Enter a repository address; select an S3 option for S3 storage.")
+                if value.startswith("/"):
+                    local = Path(os.path.realpath(value))
+                    if local == Path("/"):
+                        raise ValueError("The filesystem root / cannot be used as a repository.")
+                    local.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    os.chown(local, 0, 0)
+                    os.chmod(local, 0o700)
+                    return str(local), local
+                return value, None
+            default_repo = current_repo if current_repo and not current_s3 else None
+            repository, local_repo = self.ask_until_valid("Restic repository (local path or backend)", validate_repository, default=default_repo)
             return {"repository": repository, "backend": "restic"}, local_repo
-        if choice not in ("2", "3"):
-            fail("Select repository type 1, 2, or 3.")
 
         if choice == "2":
-            region = input("AWS region [us-east-1]: ").strip() or "us-east-1"
-            if not all(char.isalnum() or char == "-" for char in region):
-                fail("Invalid AWS region.")
+            region = self.ask_until_valid("AWS region", self.validate_region, default=current.get("region", "us-east-1"))
             endpoint = f"s3.{region}.amazonaws.com"
         else:
-            endpoint = input("S3 endpoint (for example https://s3.example.com): ").strip().rstrip("/")
-            parsed = urlsplit(endpoint)
-            if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-                fail("Enter an S3 endpoint URL such as https://s3.example.com.")
-            if parsed.scheme == "http":
-                print("WARNING: HTTP does not encrypt S3 traffic. Use HTTPS where available.")
-            region = input("S3 region [us-east-1]: ").strip() or "us-east-1"
-        bucket = input("S3 bucket name: ").strip()
-        if not bucket or any(char.isspace() for char in bucket) or "/" in bucket:
-            fail("Enter a bucket name without spaces or slashes.")
-        prefix = input("Repository prefix inside the bucket (optional): ").strip().strip("/")
+            endpoint, scheme = self.ask_until_valid("S3 endpoint (for example https://s3.example.com)", self.validate_endpoint, default=saved_endpoint or None)
+            if scheme == "http":
+                ui.status("HTTP does not encrypt S3 traffic. Prefer HTTPS.", "warning")
+            region = self.ask_until_valid("S3 region", self.validate_region, default=current.get("region", "us-east-1"))
+        bucket = self.ask_until_valid("S3 bucket name", self.validate_bucket, default=current.get("bucket", None) if current_s3 else None)
+        prefix = input(f"Repository prefix inside the bucket [{current.get('prefix', '')}]: ").strip().strip("/") or current.get("prefix", "")
         repository = f"s3:{endpoint}/{bucket}" + (f"/{prefix}" if prefix else "")
 
         existing = {}
@@ -263,23 +308,84 @@ class BackupWorkflowManager:
                 fail(f"Could not read existing S3 credentials: {exc}")
             finally:
                 credential_store.remove_runtime(work)
-        access_key_id = input("S3 access key ID (blank keeps the current value): ").strip()
-        secret_key = getpass.getpass("S3 secret access key (blank keeps the current value): ")
-        session_token = getpass.getpass("S3 session token (blank keeps current/none; '-' removes it): ")
-        credentials = {
-            "access_key_id": access_key_id or existing.get("access_key_id", ""),
-            "secret_access_key": secret_key or existing.get("secret_access_key", ""),
-            "session_token": "" if session_token == "-" else session_token or existing.get("session_token", ""),
-        }
-        if not credentials["access_key_id"] or not credentials["secret_access_key"]:
-            fail("S3 access key ID and secret access key are required.")
+        while True:
+            access_key_id = input("S3 access key ID (blank keeps the current value): ").strip()
+            secret_key = getpass.getpass("S3 secret access key (blank keeps the current value): ")
+            session_token = getpass.getpass("S3 session token (blank keeps current/none; '-' removes it): ")
+            credentials = {
+                "access_key_id": access_key_id or existing.get("access_key_id", ""),
+                "secret_access_key": secret_key or existing.get("secret_access_key", ""),
+                "session_token": "" if session_token == "-" else session_token or existing.get("session_token", ""),
+            }
+            if credentials["access_key_id"] and credentials["secret_access_key"]:
+                break
+            ui.status("S3 access key ID and secret access key are required. Enter them again.", "error")
         encrypt_credential("msp-backup-s3", json.dumps(credentials).encode(), S3_CREDENTIALS_CRED)
-        return {"repository": repository, "backend": "s3", "region": region, "bucket": bucket}, None
+        return {"repository": repository, "backend": "s3", "region": region, "bucket": bucket,
+                "s3_endpoint": endpoint, "prefix": prefix}, None
+
+    def get_repository_password(self):
+        existing_repository = CONFIG_FILE.is_file() and RESTIC_PASSWORD_CRED.is_file()
+        if existing_repository:
+            mode = self.ask_until_valid(
+                "Repository password: 1=keep the saved password, 2=enter the current repository password",
+                self.choice_validator({"1", "2"}, "Enter 1 or 2."), default="1",
+            )
+            if mode == "1":
+                work = credential_store.runtime_dir()
+                try:
+                    password_file = work / "restic-password"
+                    credential_store.decrypt_credential("msp-backup-restic", RESTIC_PASSWORD_CRED, password_file)
+                    return password_file.read_text().rstrip("\n")
+                finally:
+                    credential_store.remove_runtime(work)
+            return self.ask_until_valid(
+                "Current repository password (at least 12 characters)",
+                lambda value: value if len(value) >= 12 else self.raise_value("Use at least 12 characters."),
+                secret=True,
+            )
+        while True:
+            mode = self.ask_until_valid(
+                "Repository password: 1=generate securely, 2=enter manually",
+                self.choice_validator({"1", "2"}, "Enter 1 or 2."), default="1",
+            )
+            if mode == "1":
+                password = secrets.token_urlsafe(32)
+                ui.section("Generated Restic encryption password")
+                print(ui.paint(password, "yellow", "bold"))
+                choice = self.ask_until_valid(
+                    "Save it in your password manager and press Enter; R=regenerate; M=enter manually",
+                    lambda value: value.lower() if value.lower() in ("", "r", "m") else self.raise_value("Press Enter, R, or M."),
+                )
+                if choice == "r":
+                    continue
+                if choice == "m":
+                    mode = "2"
+                else:
+                    return password
+            if mode == "2":
+                password = self.ask_until_valid(
+                    "Repository password (at least 12 characters)",
+                    lambda value: value if len(value) >= 12 else self.raise_value("Use at least 12 characters."),
+                    secret=True,
+                )
+                self.ask_until_valid(
+                    "Confirm password",
+                    lambda value: value if value == password else self.raise_value("Passwords do not match."),
+                    secret=True,
+                )
+                return password
+
+    @staticmethod
+    def raise_value(message):
+        raise ValueError(message)
 
     def configure_repository(self):
         config = read_json(CONFIG_FILE, {})
-        if not config:
-            fail("Run Install/configure backups (menu item 1) first.")
+        if not config or not RESTIC_PASSWORD_CRED.is_file() or not RESTIC_BIN.is_file():
+            ui.status("Initial setup is not complete. Opening the full setup wizard.", "warning")
+            ensure_restic()
+            return self.setup_backup()
         settings, _ = self.collect_repository_settings()
         config.update(settings)
         if config.get("backend") != "s3":
@@ -296,26 +402,26 @@ class BackupWorkflowManager:
         info("Repository settings saved and verified.")
 
     def setup_backup(self):
+        ui.header("MSP BACKUP · INITIAL SETUP", "Configure repository, encryption, paths, and retention")
         ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
         repository_settings, local_repo = self.collect_repository_settings()
-        password = getpass.getpass("Repository password (at least 12 characters): ")
-        if len(password) < 12:
-            fail("The password must be at least 12 characters long.")
-        if password != getpass.getpass("Confirm password: "):
-            fail("Passwords do not match.")
+        password = self.get_repository_password()
         encrypt_credential("msp-backup-restic", password.encode(), RESTIC_PASSWORD_CRED)
         paths = []
-        print("Backup paths: enter one absolute path per line; an empty line finishes input.")
-        while True:
-            value = input("> ").strip()
-            if not value:
-                break
-            path = Path(value)
-            if not path.is_absolute() or not path.exists():
-                fail(f"Path must exist and be absolute: {value}")
-            paths.append(str(path))
-        if not paths:
-            fail("At least one path is required.")
+        ui.section("Backup paths")
+        print("Enter absolute paths one at a time. Submit an empty line when done.")
+        while not paths:
+            while True:
+                value = input("> ").strip()
+                if not value:
+                    break
+                path = Path(value)
+                if not path.is_absolute() or not path.exists():
+                    ui.status(f"Path must exist and be absolute: {value}. Enter another path.", "error")
+                    continue
+                paths.append(str(path))
+            if not paths:
+                ui.status("At least one backup path is required. Enter a path to continue.", "error")
         PATHS_FILE.write_text("\n".join(dict.fromkeys(paths)) + "\n")
         os.chmod(PATHS_FILE, 0o600)
         configure_db = yes_no("Configure MySQL/MariaDB, PostgreSQL, or SQLite backups?")
@@ -434,8 +540,15 @@ class BackupWorkflowManager:
         print(f"Log: {LOG_FILE}")
 
     def configure_menu(self):
-        print("1) Log rotation  2) SMTP  3) Update URL  4) Repository / S3 settings  0) Back")
-        choice = input("Choice: ").strip()
+        ui.header("SETTINGS", "Logging, notifications, updates, and repository access")
+        ui.menu_item("1", "Log rotation")
+        ui.menu_item("2", "SMTP notifications")
+        ui.menu_item("3", "Update URL")
+        ui.menu_item("4", "Repository / S3 settings")
+        ui.menu_item("0", "Back")
+        choice = self.ask_until_valid("Select an option", self.choice_validator({"0", "1", "2", "3", "4"}, "Enter 0, 1, 2, 3, or 4."))
+        if choice == "0":
+            return
         if choice == "1":
             configure_log_rotation()
         elif choice == "2":
@@ -465,52 +578,47 @@ class BackupWorkflowManager:
             "16": ("Configure repository / S3 credentials", self.configure_repository),
         }
         while True:
-            print("\n" + "=" * 68)
-            print("MSP BACKUP  |  BACKUP MANAGEMENT")
-            print("=" * 68)
-            print(" 1) Install/configure backups")
-            print(" 2) Update Restic")
-            print(" 3) Enable the daily backup timer")
-            print(" 4) Status")
-            print(" 5) Run backup now")
-            print(" 6) List snapshots")
-            print(" 7) Check repository")
-            print(" 8) Restore snapshot")
-            print(" 9) Mount snapshots")
-            print("10) Unmount snapshots")
-            print("11) Apply retention and prune")
-            print("12) Configure database backups")
-            print("13) Configure logs, SMTP, and updates")
-            print("14) Check for MSP Backup updates")
-            print("15) Configure weekly MSP Backup auto-updates")
-            print("16) Configure repository / S3 credentials")
-            print("-" * 68)
-            choice = input("Action (0 to exit): ").strip()
+            ui.header("MSP BACKUP", f"Backup management  ·  Version {VERSION}")
+            ui.section("Backup operations")
+            ui.menu_item("1", "Install / configure backups", "repository, password, paths, schedule")
+            ui.menu_item("2", "Update Restic")
+            ui.menu_item("3", "Enable the daily backup timer")
+            ui.menu_item("4", "Status")
+            ui.menu_item("5", "Run backup now")
+            ui.menu_item("6", "List snapshots")
+            ui.menu_item("7", "Check repository")
+            ui.menu_item("8", "Restore snapshot")
+            ui.menu_item("9", "Mount snapshots")
+            ui.menu_item("10", "Unmount snapshots")
+            ui.menu_item("11", "Apply retention and prune")
+            ui.section("Configuration")
+            ui.menu_item("12", "Database backups")
+            ui.menu_item("13", "Logs, SMTP, and updates")
+            ui.menu_item("14", "Check for MSP Backup updates")
+            ui.menu_item("15", "Weekly MSP Backup auto-updates")
+            ui.menu_item("16", "Repository / S3 settings")
+            print()
+            choice = self.ask_until_valid("Action (0 to exit)", self.choice_validator(set(actions) | {"0"}, "Choose an item from 0 to 16."))
             if choice == "0":
-                print("Exiting MSP Backup.")
+                ui.status("Exiting MSP Backup.", "success")
                 return
             selected = actions.get(choice)
-            if selected is None:
-                print("[INPUT ERROR] Invalid choice. Select an item from 0 to 16.")
-                continue
             label, action = selected
-            print("\n" + "-" * 68)
-            print(f"ACTION: {label}")
-            print("-" * 68)
-            try:
-                action()
-            except (BackupError, subprocess.CalledProcessError, OSError, ValueError) as exc:
-                if logger.handlers:
-                    logger.error("Action '%s' failed: %s", label, exc)
-                print("\n" + "!" * 68, file=sys.stderr)
-                print(f"ACTION FAILED: {label}", file=sys.stderr)
-                print(str(exc), file=sys.stderr)
-                print("Returning to the menu.", file=sys.stderr)
-                print("!" * 68, file=sys.stderr)
-            else:
-                print("-" * 68)
-                print(f"ACTION COMPLETE: {label}")
-                print("-" * 68)
+            ui.header(label.upper(), "Action in progress")
+            while True:
+                try:
+                    action()
+                except (BackupError, subprocess.CalledProcessError, OSError, ValueError) as exc:
+                    if logger.handlers:
+                        logger.error("Action '%s' failed: %s", label, exc)
+                    ui.status(str(exc), "error")
+                    retry = input("Press Enter to retry this action, or M to return to the menu: ").strip().lower()
+                    if retry != "m":
+                        ui.header(label.upper(), "Retrying action")
+                        continue
+                else:
+                    ui.status(f"{label} completed.", "success")
+                break
 
 backup_workflows = BackupWorkflowManager()
 migrate_legacy_secrets = backup_workflows.migrate_legacy_secrets

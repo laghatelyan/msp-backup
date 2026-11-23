@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0
+
+- Made repository/S3 configuration accessible from item 16 on both first run and reconfiguration.
+- Added secure automatic Restic repository password generation and prompt-level validation retries.
+- Added an ANSI terminal interface with versioned menus and clearer operation states.
+
 ## 1.4.0
 
 - Added guided Amazon S3 and S3-compatible repository setup.

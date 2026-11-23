@@ -77,6 +77,50 @@ class BackupError(RuntimeError):
     pass
 
 
+class TerminalUI:
+    """Small ANSI terminal presentation layer with a plain-text fallback."""
+
+    COLORS = {"blue": "34", "cyan": "36", "green": "32", "yellow": "33", "red": "31", "muted": "90", "bold": "1"}
+
+    def __init__(self):
+        self.color = sys.stdout.isatty() and sys.stderr.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
+
+    def paint(self, value, *styles):
+        if not self.color:
+            return str(value)
+        codes = ";".join(self.COLORS[style] for style in styles if style in self.COLORS)
+        return f"\033[{codes}m{value}\033[0m" if codes else str(value)
+
+    def clear(self):
+        if self.color:
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+
+    def header(self, title, subtitle=""):
+        self.clear()
+        print(self.paint("━" * 72, "blue"))
+        print(self.paint(f"  {title}", "bold", "blue"))
+        if subtitle:
+            print(self.paint(f"  {subtitle}", "muted"))
+        print(self.paint("━" * 72, "blue"))
+
+    def section(self, title):
+        print(f"\n{self.paint('›', 'cyan', 'bold')} {self.paint(title, 'bold')}")
+
+    def status(self, message, state="running"):
+        icon, style = {"running": ("●", "cyan"), "success": ("✓", "green"), "error": ("✗", "red"), "warning": ("!", "yellow")}.get(state, ("•", "muted"))
+        print(f"{self.paint(icon, style, 'bold')} {message}", flush=True)
+
+    def menu_item(self, key, label, description=""):
+        line = f"  {self.paint(key.rjust(2), 'cyan', 'bold')}  {label}"
+        if description:
+            line += f"  {self.paint(description, 'muted')}"
+        print(line)
+
+
+ui = TerminalUI()
+
+
 def get_family():
     return FAMILY
 
@@ -100,7 +144,7 @@ def link_systemd_unit(source):
     destination.symlink_to(source.resolve())
 
 def info(message):
-    print(f"\n==> {message}", flush=True)
+    ui.status(message, "success")
     logger.info(message)
 
 
@@ -144,18 +188,24 @@ def input_default(prompt, default=""):
 
 
 def input_positive_int(prompt, default, maximum=999):
-    value = input_default(prompt, str(default))
-    if not value.isdecimal() or not 1 <= int(value) <= maximum:
-        fail(f"Value must be between 1 and {maximum}.")
-    return int(value)
+    while True:
+        value = input_default(prompt, str(default))
+        if value.isdecimal() and 1 <= int(value) <= maximum:
+            return int(value)
+        ui.status(f"Value must be between 1 and {maximum}. Try again.", "error")
 
 
 def yes_no(prompt, default=False):
     suffix = "[Y/n]" if default else "[y/N]"
-    value = input(f"{prompt} {suffix} ").strip().lower()
-    if not value:
-        return default
-    return value in ("y", "yes")
+    while True:
+        value = input(f"{prompt} {suffix} ").strip().lower()
+        if not value:
+            return default
+        if value in ("y", "yes"):
+            return True
+        if value in ("n", "no"):
+            return False
+        ui.status("Enter y or n.", "error")
 
 class SystemManager:
     """Manage system operations."""
@@ -251,15 +301,21 @@ class SystemManager:
         LOGROTATE.symlink_to(LOGROTATE_CONFIG)
 
     def run_stream(self, args, *, env=None, label=None, check=True):
-        logger.info("Starting %s", label or Path(args[0]).name)
+        operation = label or Path(args[0]).name
+        logger.info("Starting %s", operation)
+        ui.status(f"Running {operation}…", "running")
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         assert process.stdout
         for line in process.stdout:
             print(line, end="", flush=True)
             logger.info(line.rstrip())
         code = process.wait()
+        if code:
+            ui.status(f"{operation} failed (exit code {code}).", "error")
+        else:
+            ui.status(f"{operation} finished.", "success")
         if code and check:
-            raise BackupError(f"Command exited with code {code}: {label or Path(args[0]).name}")
+            raise BackupError(f"Command exited with code {code}: {operation}")
         return code
 
     def install_dependencies(self):
