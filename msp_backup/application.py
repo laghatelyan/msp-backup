@@ -262,11 +262,14 @@ class BackupWorkflowManager:
             default_type = "2" if current_repo.startswith("s3:s3.") and not saved_endpoint.startswith(("http://", "https://")) else "3"
         else:
             default_type = "1"
-        ui.section("Repository backend")
-        print("  1  Local path or another Restic backend (SFTP, REST, etc.)")
-        print("  2  Amazon S3")
-        print("  3  S3-compatible storage (Wasabi, Backblaze, MinIO, etc.)")
-        choice = self.ask_until_valid("Select repository type", self.choice_validator({"1", "2", "3"}, "Enter 1, 2, or 3."), default=default_type)
+        choice = ui.select("REPOSITORY BACKEND", [
+            ("1", "Local path or another Restic backend", "SFTP, REST, etc."),
+            ("2", "Amazon S3"),
+            ("3", "S3-compatible storage", "Wasabi, Backblaze, MinIO, etc."),
+            ("0", "Cancel"),
+        ], "Use ↑/↓ or left/right, then Enter.", initial=int(default_type) - 1)
+        if choice in (None, "0"):
+            fail("Repository setup cancelled.")
         if choice == "1":
             def validate_repository(value):
                 value = value.strip()
@@ -327,10 +330,13 @@ class BackupWorkflowManager:
     def get_repository_password(self):
         existing_repository = CONFIG_FILE.is_file() and RESTIC_PASSWORD_CRED.is_file()
         if existing_repository:
-            mode = self.ask_until_valid(
-                "Repository password: 1=keep the saved password, 2=enter the current repository password",
-                self.choice_validator({"1", "2"}, "Enter 1 or 2."), default="1",
-            )
+            mode = ui.select("RESTIC REPOSITORY PASSWORD", [
+                ("1", "Keep the saved password", "recommended for existing repositories"),
+                ("2", "Enter the current repository password"),
+                ("0", "Cancel"),
+            ], "Changing the password can make existing snapshots inaccessible.")
+            if mode in (None, "0"):
+                fail("Password setup cancelled.")
             if mode == "1":
                 work = credential_store.runtime_dir()
                 try:
@@ -345,21 +351,28 @@ class BackupWorkflowManager:
                 secret=True,
             )
         while True:
-            mode = self.ask_until_valid(
-                "Repository password: 1=generate securely, 2=enter manually",
-                self.choice_validator({"1", "2"}, "Enter 1 or 2."), default="1",
-            )
+            mode = ui.select("RESTIC REPOSITORY PASSWORD", [
+                ("1", "Generate a secure password", "recommended"),
+                ("2", "Enter a password manually"),
+                ("0", "Cancel"),
+            ], "Use ↑/↓ or left/right, then Enter.")
+            if mode in (None, "0"):
+                fail("Password setup cancelled.")
             if mode == "1":
                 password = secrets.token_urlsafe(32)
-                ui.section("Generated Restic encryption password")
+                ui.header("GENERATED RESTIC PASSWORD", "Save this password in Bitwarden before continuing")
                 print(ui.paint(password, "yellow", "bold"))
-                choice = self.ask_until_valid(
-                    "Save it in your password manager and press Enter; R=regenerate; M=enter manually",
-                    lambda value: value.lower() if value.lower() in ("", "r", "m") else self.raise_value("Press Enter, R, or M."),
-                )
-                if choice == "r":
+                choice = ui.select("NEXT STEP", [
+                    ("1", "I saved it — continue"),
+                    ("2", "Generate another password"),
+                    ("3", "Enter a password manually"),
+                    ("0", "Cancel setup"),
+                ], "The generated password will not be shown again.")
+                if choice in (None, "0"):
+                    fail("Password setup cancelled.")
+                if choice == "2":
                     continue
-                if choice == "m":
+                if choice == "3":
                     mode = "2"
                 else:
                     return password
@@ -540,14 +553,14 @@ class BackupWorkflowManager:
         print(f"Log: {LOG_FILE}")
 
     def configure_menu(self):
-        ui.header("SETTINGS", "Logging, notifications, updates, and repository access")
-        ui.menu_item("1", "Log rotation")
-        ui.menu_item("2", "SMTP notifications")
-        ui.menu_item("3", "Update URL")
-        ui.menu_item("4", "Repository / S3 settings")
-        ui.menu_item("0", "Back")
-        choice = self.ask_until_valid("Select an option", self.choice_validator({"0", "1", "2", "3", "4"}, "Enter 0, 1, 2, 3, or 4."))
-        if choice == "0":
+        choice = ui.select("SETTINGS", [
+            ("1", "Log rotation"),
+            ("2", "SMTP notifications"),
+            ("3", "Update URL"),
+            ("4", "Repository / S3 settings"),
+            ("0", "Back"),
+        ], "Use ↑/↓ or left/right, then Enter.")
+        if choice in (None, "0"):
             return
         if choice == "1":
             configure_log_rotation()
@@ -577,32 +590,24 @@ class BackupWorkflowManager:
             "15": ("Configure weekly MSP Backup auto-updates", install_script_update_timer),
             "16": ("Configure repository / S3 credentials", self.configure_repository),
         }
+        menu_options = []
+        for key, (label, _) in actions.items():
+            description = {
+                "1": "repository, password, paths, schedule",
+                "16": "configure storage and S3 credentials",
+            }.get(key, "")
+            menu_options.append((key, label, description))
+        menu_options.append(("0", "Exit"))
         while True:
-            ui.header("MSP BACKUP", f"Backup management  ·  Version {VERSION}")
-            ui.section("Backup operations")
-            ui.menu_item("1", "Install / configure backups", "repository, password, paths, schedule")
-            ui.menu_item("2", "Update Restic")
-            ui.menu_item("3", "Enable the daily backup timer")
-            ui.menu_item("4", "Status")
-            ui.menu_item("5", "Run backup now")
-            ui.menu_item("6", "List snapshots")
-            ui.menu_item("7", "Check repository")
-            ui.menu_item("8", "Restore snapshot")
-            ui.menu_item("9", "Mount snapshots")
-            ui.menu_item("10", "Unmount snapshots")
-            ui.menu_item("11", "Apply retention and prune")
-            ui.section("Configuration")
-            ui.menu_item("12", "Database backups")
-            ui.menu_item("13", "Logs, SMTP, and updates")
-            ui.menu_item("14", "Check for MSP Backup updates")
-            ui.menu_item("15", "Weekly MSP Backup auto-updates")
-            ui.menu_item("16", "Repository / S3 settings")
-            print()
-            choice = self.ask_until_valid("Action (0 to exit)", self.choice_validator(set(actions) | {"0"}, "Choose an item from 0 to 16."))
+            choice = ui.select("MSP BACKUP", menu_options, f"Backup management  ·  Version {VERSION}  ·  Navigate with arrow keys")
             if choice == "0":
                 ui.status("Exiting MSP Backup.", "success")
                 return
+            if choice is None:
+                continue
             selected = actions.get(choice)
+            if selected is None:
+                continue
             label, action = selected
             ui.header(label.upper(), "Action in progress")
             while True:
@@ -611,13 +616,16 @@ class BackupWorkflowManager:
                 except (BackupError, subprocess.CalledProcessError, OSError, ValueError) as exc:
                     if logger.handlers:
                         logger.error("Action '%s' failed: %s", label, exc)
-                    ui.status(str(exc), "error")
-                    retry = input("Press Enter to retry this action, or M to return to the menu: ").strip().lower()
-                    if retry != "m":
+                    retry = ui.select("ACTION FAILED", [
+                        ("r", "Retry this action"),
+                        ("0", "Return to main menu"),
+                    ], str(exc))
+                    if retry == "r":
                         ui.header(label.upper(), "Retrying action")
                         continue
                 else:
                     ui.status(f"{label} completed.", "success")
+                    ui.pause("Review the output; press any key to return to the menu")
                 break
 
 backup_workflows = BackupWorkflowManager()

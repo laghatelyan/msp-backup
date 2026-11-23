@@ -84,7 +84,8 @@ class TerminalUI:
     COLORS = {"blue": "34", "cyan": "36", "green": "32", "yellow": "33", "red": "31", "muted": "90", "bold": "1"}
 
     def __init__(self):
-        self.color = sys.stdout.isatty() and sys.stderr.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
+        self.interactive = sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+        self.color = self.interactive and "NO_COLOR" not in os.environ
 
     def paint(self, value, *styles):
         if not self.color:
@@ -93,7 +94,7 @@ class TerminalUI:
         return f"\033[{codes}m{value}\033[0m" if codes else str(value)
 
     def clear(self):
-        if self.color:
+        if self.interactive:
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
 
@@ -117,6 +118,77 @@ class TerminalUI:
         if description:
             line += f"  {self.paint(description, 'muted')}"
         print(line)
+
+    @staticmethod
+    def _read_key():
+        import select
+        import termios
+        import tty
+
+        descriptor = sys.stdin.fileno()
+        previous = termios.tcgetattr(descriptor)
+        try:
+            tty.setraw(descriptor)
+            first = os.read(descriptor, 1)
+            sequence = bytearray(first)
+            if first == b"\x1b":
+                while select.select([descriptor], [], [], 0.15)[0] and len(sequence) < 8:
+                    sequence.extend(os.read(descriptor, 1))
+            return sequence.decode("utf-8", errors="ignore")
+        finally:
+            termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+
+    def select(self, title, options, subtitle="", initial=0):
+        """Select an option with arrow keys, falling back to numbered input."""
+        options = list(options)
+        if not options:
+            return None
+        if not self.interactive:
+            self.header(title, subtitle)
+            for key, label, *rest in options:
+                self.menu_item(key, label, rest[0] if rest else "")
+            valid = {str(key) for key, *_ in options}
+            while True:
+                value = input("Select an option: ").strip()
+                if value in valid:
+                    return value
+                self.status("Choose one of the listed options.", "error")
+
+        selected = max(0, min(initial, len(options) - 1))
+        keys = {str(option[0]) for option in options}
+        while True:
+            self.header(title, subtitle)
+            for index, (key, label, *rest) in enumerate(options):
+                description = rest[0] if rest else ""
+                marker = self.paint("❯", "cyan", "bold") if index == selected else " "
+                line = f" {marker} {self.paint(str(key).rjust(2), 'cyan', 'bold')}  {label}"
+                if description:
+                    line += f"  {self.paint(description, 'muted')}"
+                print(line)
+            print(f"\n{self.paint('↑/↓', 'cyan', 'bold')} navigate   {self.paint('Enter', 'cyan', 'bold')} select   {self.paint('0/Esc', 'cyan', 'bold')} back")
+            key = self._read_key()
+            if key in ("\x1b[A", "\x1bOA"):
+                selected = (selected - 1) % len(options)
+            elif key in ("\x1b[B", "\x1bOB"):
+                selected = (selected + 1) % len(options)
+            elif key in ("\r", "\n"):
+                return str(options[selected][0])
+            elif key in ("\x03", "\x1b"):
+                return "0" if "0" in keys else None
+            elif key == "0" and "0" in keys:
+                return "0"
+            elif key in ("\x1b[C", "\x1bOC"):
+                selected = (selected + 1) % len(options)
+            elif key in ("\x1b[D", "\x1bOD"):
+                selected = (selected - 1) % len(options)
+
+    def pause(self, prompt="Press any key to continue"):
+        if self.interactive:
+            print(f"\n{self.paint(prompt, 'muted')}", end="", flush=True)
+            self._read_key()
+            print()
+        else:
+            input(f"\n{prompt} (Enter) ")
 
 
 ui = TerminalUI()
@@ -197,16 +269,20 @@ def input_positive_int(prompt, default, maximum=999):
 
 
 def yes_no(prompt, default=False):
-    suffix = "[Y/n]" if default else "[y/N]"
-    while True:
-        value = input(f"{prompt} {suffix} ").strip().lower()
-        if not value:
-            return default
-        if value in ("y", "yes"):
-            return True
-        if value in ("n", "no"):
-            return False
-        ui.status("Enter y or n.", "error")
+    if not ui.interactive:
+        suffix = "[Y/n]" if default else "[y/N]"
+        while True:
+            value = input(f"{prompt} {suffix} ").strip().lower()
+            if not value:
+                return default
+            if value in ("y", "yes"):
+                return True
+            if value in ("n", "no"):
+                return False
+            ui.status("Enter y or n.", "error")
+    initial = 0 if default else 1
+    choice = ui.select(prompt, [("y", "Yes"), ("n", "No")], "Use ↑/↓ or left/right, then Enter.", initial=initial)
+    return default if choice is None else choice == "y"
 
 class SystemManager:
     """Manage system operations."""

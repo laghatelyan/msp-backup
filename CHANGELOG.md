@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0
+
+- Added arrow-key navigation for interactive terminal menus and confirmation dialogs.
+- Kept command output, including snapshot lists, visible until a key is pressed.
+- Added numbered-menu fallback for non-interactive terminals.
+
 ## 1.5.1
 
 - Set a private Restic cache directory under `/opt/msp-backup/` for systemd runs without `HOME`.
