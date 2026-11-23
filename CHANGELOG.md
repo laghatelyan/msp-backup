@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0
+
+- Added guided Amazon S3 and S3-compatible repository setup.
+- Encrypted S3 access keys and session tokens; provided a menu action to change repository settings later.
+- Passed S3 credentials to Restic only from a protected temporary runtime directory.
+
 ## 1.3.0
 
 - Relocated the application, Restic binary, configuration, credentials, and logs under `/opt/msp-backup/`.

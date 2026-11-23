@@ -1,4 +1,6 @@
 from pathlib import Path
+from urllib.parse import urlsplit
+import json
 import getpass
 import os
 import shutil
@@ -7,7 +9,7 @@ import sys
 import time
 
 
-from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, yes_no
+from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, yes_no
 from .common import BackupError, logger
 from .restic import ensure_restic, restic, restic_installer, restic_manager, update_restic
 from .database import configure_database, database_backup_manager
@@ -208,20 +210,94 @@ class BackupWorkflowManager:
         run_stream(["systemctl", "daemon-reload"])
         run_stream(["systemctl", "enable", "--now", "msp-backup.timer"])
 
+    def collect_repository_settings(self):
+        print("Repository type:")
+        print(" 1) Local path or another Restic backend (SFTP, REST, etc.)")
+        print(" 2) Amazon S3")
+        print(" 3) S3-compatible storage (Wasabi, Backblaze, MinIO, etc.)")
+        choice = input("Select repository type [1]: ").strip() or "1"
+        if choice == "1":
+            repository = input("Restic repository (local path or backend): ").strip()
+            if not repository or "'" in repository or "\n" in repository or repository.startswith("s3:"):
+                fail("Enter a valid repository address; select an S3 option for S3 storage.")
+            local_repo = None
+            if repository.startswith("/"):
+                local_repo = Path(os.path.realpath(repository))
+                if local_repo == Path("/"):
+                    fail("The filesystem root / cannot be used as a repository.")
+                local_repo.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.chown(local_repo, 0, 0)
+                os.chmod(local_repo, 0o700)
+                repository = str(local_repo)
+            return {"repository": repository, "backend": "restic"}, local_repo
+        if choice not in ("2", "3"):
+            fail("Select repository type 1, 2, or 3.")
+
+        if choice == "2":
+            region = input("AWS region [us-east-1]: ").strip() or "us-east-1"
+            if not all(char.isalnum() or char == "-" for char in region):
+                fail("Invalid AWS region.")
+            endpoint = f"s3.{region}.amazonaws.com"
+        else:
+            endpoint = input("S3 endpoint (for example https://s3.example.com): ").strip().rstrip("/")
+            parsed = urlsplit(endpoint)
+            if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                fail("Enter an S3 endpoint URL such as https://s3.example.com.")
+            if parsed.scheme == "http":
+                print("WARNING: HTTP does not encrypt S3 traffic. Use HTTPS where available.")
+            region = input("S3 region [us-east-1]: ").strip() or "us-east-1"
+        bucket = input("S3 bucket name: ").strip()
+        if not bucket or any(char.isspace() for char in bucket) or "/" in bucket:
+            fail("Enter a bucket name without spaces or slashes.")
+        prefix = input("Repository prefix inside the bucket (optional): ").strip().strip("/")
+        repository = f"s3:{endpoint}/{bucket}" + (f"/{prefix}" if prefix else "")
+
+        existing = {}
+        if S3_CREDENTIALS_CRED.is_file():
+            work = credential_store.runtime_dir()
+            try:
+                credential_file = work / "s3-credentials.json"
+                credential_store.decrypt_credential("msp-backup-s3", S3_CREDENTIALS_CRED, credential_file)
+                existing = json.loads(credential_file.read_text())
+            except (OSError, ValueError, BackupError) as exc:
+                fail(f"Could not read existing S3 credentials: {exc}")
+            finally:
+                credential_store.remove_runtime(work)
+        access_key_id = input("S3 access key ID (blank keeps the current value): ").strip()
+        secret_key = getpass.getpass("S3 secret access key (blank keeps the current value): ")
+        session_token = getpass.getpass("S3 session token (blank keeps current/none; '-' removes it): ")
+        credentials = {
+            "access_key_id": access_key_id or existing.get("access_key_id", ""),
+            "secret_access_key": secret_key or existing.get("secret_access_key", ""),
+            "session_token": "" if session_token == "-" else session_token or existing.get("session_token", ""),
+        }
+        if not credentials["access_key_id"] or not credentials["secret_access_key"]:
+            fail("S3 access key ID and secret access key are required.")
+        encrypt_credential("msp-backup-s3", json.dumps(credentials).encode(), S3_CREDENTIALS_CRED)
+        return {"repository": repository, "backend": "s3", "region": region, "bucket": bucket}, None
+
+    def configure_repository(self):
+        config = read_json(CONFIG_FILE, {})
+        if not config:
+            fail("Run Install/configure backups (menu item 1) first.")
+        settings, _ = self.collect_repository_settings()
+        config.update(settings)
+        if config.get("backend") != "s3":
+            config.pop("region", None)
+            config.pop("bucket", None)
+        save_json(CONFIG_FILE, config)
+        if config.get("backend") != "s3":
+            credential_store.remove_old_secret(S3_CREDENTIALS_CRED)
+        if restic("snapshots", check=False, quiet=True):
+            if yes_no("The repository is not initialized. Initialize it now?"):
+                restic("init")
+            else:
+                fail("The repository is not initialized.")
+        info("Repository settings saved and verified.")
+
     def setup_backup(self):
         ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
-        repository = input("Restic repository (local path or backend): ").strip()
-        if not repository or "'" in repository or "\n" in repository:
-            fail("Invalid repository address.")
-        local_repo = None
-        if repository.startswith("/"):
-            local_repo = Path(os.path.realpath(repository))
-            if local_repo == Path("/"):
-                fail("The filesystem root / cannot be used as a repository.")
-            local_repo.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.chown(local_repo, 0, 0)
-            os.chmod(local_repo, 0o700)
-            repository = str(local_repo)
+        repository_settings, local_repo = self.collect_repository_settings()
         password = getpass.getpass("Repository password (at least 12 characters): ")
         if len(password) < 12:
             fail("The password must be at least 12 characters long.")
@@ -258,9 +334,11 @@ class BackupWorkflowManager:
             "daily": input_positive_int("Daily snapshots to keep", 7),
             "weekly": input_positive_int("Weekly snapshots to keep", 4),
             "monthly": input_positive_int("Monthly snapshots to keep", 12),
-            "repository": repository,
         }
+        keep.update(repository_settings)
         save_json(CONFIG_FILE, keep)
+        if keep.get("backend") != "s3":
+            credential_store.remove_old_secret(S3_CREDENTIALS_CRED)
         PATHS_FILE.write_text("\n".join(dict.fromkeys(paths)) + "\n")
         os.chmod(PATHS_FILE, 0o600)
         if restic("snapshots", check=False, quiet=True):
@@ -349,12 +427,14 @@ class BackupWorkflowManager:
         db = read_json(DB_CONFIG_FILE, {})
         smtp = read_json(SMTP_CONFIG_FILE, {})
         print(f"Repository: {config.get('repository', 'not configured')}")
+        if config.get("backend") == "s3":
+            print(f"Storage: S3 bucket {config.get('bucket', '')} (region {config.get('region', 'default')})")
         print(f"Database: {db.get('engine', 'not configured')}")
         print(f"SMTP notifications: {'enabled' if smtp.get('enabled') else 'disabled'}")
         print(f"Log: {LOG_FILE}")
 
     def configure_menu(self):
-        print("1) Log rotation  2) SMTP  3) Update URL  0) Back")
+        print("1) Log rotation  2) SMTP  3) Update URL  4) Repository / S3 settings  0) Back")
         choice = input("Choice: ").strip()
         if choice == "1":
             configure_log_rotation()
@@ -362,6 +442,8 @@ class BackupWorkflowManager:
             configure_notifications()
         elif choice == "3":
             configure_update_url()
+        elif choice == "4":
+            self.configure_repository()
 
     def menu(self):
         actions = {
@@ -380,6 +462,7 @@ class BackupWorkflowManager:
             "13": ("Configure logs, SMTP, and updates", configure_menu),
             "14": ("Check for MSP Backup updates", lambda: check_script_update(install=False)),
             "15": ("Configure weekly MSP Backup auto-updates", install_script_update_timer),
+            "16": ("Configure repository / S3 credentials", self.configure_repository),
         }
         while True:
             print("\n" + "=" * 68)
@@ -400,6 +483,7 @@ class BackupWorkflowManager:
             print("13) Configure logs, SMTP, and updates")
             print("14) Check for MSP Backup updates")
             print("15) Configure weekly MSP Backup auto-updates")
+            print("16) Configure repository / S3 credentials")
             print("-" * 68)
             choice = input("Action (0 to exit): ").strip()
             if choice == "0":
@@ -407,7 +491,7 @@ class BackupWorkflowManager:
                 return
             selected = actions.get(choice)
             if selected is None:
-                print("[INPUT ERROR] Invalid choice. Select an item from 0 to 15.")
+                print("[INPUT ERROR] Invalid choice. Select an item from 0 to 16.")
                 continue
             label, action = selected
             print("\n" + "-" * 68)

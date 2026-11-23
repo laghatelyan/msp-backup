@@ -35,6 +35,7 @@ DB_DUMP_DIR = Path("/run/msp-backup/db-dumps")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 
 RESTIC_PASSWORD_CRED = ETC / "restic-password.cred"
+S3_CREDENTIALS_CRED = ETC / "s3-credentials.cred"
 
 DB_PASSWORD_CRED = ETC / "database-password.cred"
 

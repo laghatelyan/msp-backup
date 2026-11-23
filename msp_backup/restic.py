@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 
-from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_PASSWORD_CRED, VERSION, decrypt_credential, fail, info, load_config, logger, remove_runtime, run_stream, runtime_dir
+from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, VERSION, decrypt_credential, fail, info, load_config, logger, remove_runtime, run_stream, runtime_dir
 
 class ResticManager:
     """Run Restic with repository credentials kept in memory-backed storage."""
@@ -28,6 +28,27 @@ class ResticManager:
             env = os.environ.copy()
             env["RESTIC_REPOSITORY"] = config["repository"]
             env["RESTIC_PASSWORD_FILE"] = str(password)
+            if config["repository"].startswith("s3:") and config.get("backend") != "s3":
+                fail("This S3 repository has no saved credentials. Configure repository / S3 credentials from the menu.")
+            if config.get("backend") == "s3":
+                if not S3_CREDENTIALS_CRED.is_file():
+                    fail("S3 credentials are missing. Configure S3 storage from the menu.")
+                s3_credentials = work / "s3-credentials.json"
+                decrypt_credential("msp-backup-s3", S3_CREDENTIALS_CRED, s3_credentials)
+                try:
+                    credentials = json.loads(s3_credentials.read_text())
+                    access_key_id = credentials["access_key_id"]
+                    secret_access_key = credentials["secret_access_key"]
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    raise BackupError(f"The encrypted S3 credential is invalid: {exc}") from exc
+                env["AWS_ACCESS_KEY_ID"] = access_key_id
+                env["AWS_SECRET_ACCESS_KEY"] = secret_access_key
+                if credentials.get("session_token"):
+                    env["AWS_SESSION_TOKEN"] = credentials["session_token"]
+                else:
+                    env.pop("AWS_SESSION_TOKEN", None)
+                if config.get("region"):
+                    env["AWS_DEFAULT_REGION"] = config["region"]
             command = [str(self.binary), *args]
             if quiet:
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
