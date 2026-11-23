@@ -8,18 +8,22 @@ import ssl
 import subprocess
 import sys
 
-from .common import BackupError, ETC, RUN_REPORT_FILE, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, VERSION, decrypt_credential, encrypt_credential, fail, info, input_default, logger, read_json, remove_runtime, runtime_dir, save_json, write_logrotate, yes_no
+from .common import BackupError, ETC, RUN_REPORT_FILE, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, VERSION, decrypt_credential, encrypt_credential, fail, info, input_default, logger, read_json, remove_runtime, runtime_dir, save_json, ui, write_logrotate, yes_no
 
 class NotificationManager:
     """Own notifications configuration and operational workflows."""
 
     def configure_log_rotation(self):
-        frequency = input_default("Rotation frequency [daily/weekly/monthly]", "daily")
-        if frequency not in ("daily", "weekly", "monthly"):
-            fail("Choose daily, weekly, or monthly.")
-        count_text = input_default("Number of archives to keep (1–365)", "14")
-        if not count_text.isdecimal() or not 1 <= int(count_text) <= 365:
-            fail("The number of archives must be between 1 and 365.")
+        frequency = ui.select("LOG ROTATION", [
+            ("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly"), ("0", "Cancel")
+        ], "Use ↑/↓ or left/right, then Enter.")
+        if frequency in (None, "0"):
+            return
+        while True:
+            count_text = input_default("Number of archives to keep (1–365)", "14")
+            if count_text.isdecimal() and 1 <= int(count_text) <= 365:
+                break
+            ui.status("Enter a number from 1 to 365.", "error")
         write_logrotate(frequency, int(count_text))
         info(f"Log rotation: {frequency}, archives: {count_text}.")
 
@@ -30,33 +34,51 @@ class NotificationManager:
             SMTP_PASSWORD_CRED.unlink(missing_ok=True)
             info("Notifications are disabled.")
             return
-        host = input("SMTP server: ").strip()
-        if not host or any(ch.isspace() for ch in host) or "=" in host:
-            fail("Invalid SMTP host.")
-        tls_choice = input_default("TLS: 1=STARTTLS/587, 2=SSL-TLS/465", "1")
-        if tls_choice not in ("1", "2"):
-            fail("Choose STARTTLS or SSL/TLS.")
+        while True:
+            host = input("SMTP server: ").strip()
+            if host and not any(ch.isspace() for ch in host) and "=" not in host:
+                break
+            ui.status("Enter a valid SMTP server name.", "error")
+        tls_choice = ui.select("SMTP ENCRYPTION", [
+            ("1", "STARTTLS", "usually port 587"),
+            ("2", "SSL/TLS", "usually port 465"),
+            ("0", "Cancel"),
+        ], "Use ↑/↓ or left/right, then Enter.")
+        if tls_choice in (None, "0"):
+            return
         tls = "starttls" if tls_choice == "1" else "ssl"
-        port = input_default("SMTP port", "587" if tls == "starttls" else "465")
-        if not port.isdecimal() or not 1 <= int(port) <= 65535:
-            fail("Invalid SMTP port.")
+        while True:
+            port = input_default("SMTP port", "587" if tls == "starttls" else "465")
+            if port.isdecimal() and 1 <= int(port) <= 65535:
+                break
+            ui.status("Enter a port from 1 to 65535.", "error")
         auth = yes_no("Use SMTP authentication?", default=True)
         username = ""
         if auth:
-            username = input("SMTP username: ").strip()
-            secret = getpass.getpass("SMTP password: ")
-            if not username or not secret:
-                fail("SMTP username and password are required.")
+            while True:
+                username = input("SMTP username: ").strip()
+                secret = getpass.getpass("SMTP password: ")
+                if username and secret:
+                    break
+                ui.status("SMTP username and password are required.", "error")
             encrypt_credential("msp-backup-smtp", secret.encode(), SMTP_PASSWORD_CRED)
         else:
             SMTP_PASSWORD_CRED.unlink(missing_ok=True)
-        sender = input("Sender email address: ").strip()
-        recipients = input("Recipient email addresses, comma-separated: ").strip()
-        if "@" not in sender or any(ch.isspace() for ch in sender) or "@" not in recipients or any(ch.isspace() for ch in recipients):
-            fail("Enter valid email addresses.")
-        mode_choice = input_default("1=Always, 2=Only on failures", "2")
-        if mode_choice not in ("1", "2"):
-            fail("Choose 1 or 2.")
+        while True:
+            sender = input("Sender email address: ").strip()
+            recipients = input("Recipient email addresses, comma-separated: ").strip()
+            parsed_sender = [address for _, address in getaddresses([sender]) if address]
+            parsed_recipients = [address for _, address in getaddresses([recipients]) if address]
+            if len(parsed_sender) == 1 and parsed_recipients and all("@" in address for address in (*parsed_sender, *parsed_recipients)):
+                break
+            ui.status("Enter a valid sender and at least one recipient email address.", "error")
+        mode_choice = ui.select("EMAIL NOTIFICATIONS", [
+            ("1", "Always", "after successful and failed backups"),
+            ("2", "Only on failures"),
+            ("0", "Cancel"),
+        ], "Use ↑/↓ or left/right, then Enter.", initial=1)
+        if mode_choice in (None, "0"):
+            return
         data = {"enabled": True, "host": host, "port": int(port), "tls": tls, "auth": auth,
                 "user": username, "from": sender, "to": recipients, "mode": "always" if mode_choice == "1" else "failures"}
         save_json(SMTP_CONFIG_FILE, data)
@@ -93,6 +115,9 @@ class NotificationManager:
                 report_lines.append(f"Snapshot time: {snapshot['time']}")
             if report.get("error"):
                 report_lines.append(f"Restic error: {report['error']}")
+            database = report.get("database") or {}
+            if database:
+                report_lines.append(f"Databases: {database.get('count', 0)} ({database.get('engine', 'unknown')})")
         if event == "failure":
             body = "The backup service failed.\n" + "\n".join(report_lines)
             if journal:

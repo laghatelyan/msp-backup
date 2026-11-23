@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.0
+
+- Replaced remaining categorical prompts with arrow-key selections and retryable validation.
+- Added automatic discovery and separate backup files for every MySQL/MariaDB and PostgreSQL database.
+- Added separate MySQL account/grant and PostgreSQL global-role exports.
+- Added SQLite file or directory discovery with one online backup per database file.
+- Added `/run` capacity checks before staging database dumps and cleanup of partial dumps.
+
 ## 1.9.0
 
 - Added bounded repository data verification (1 MiB–1 GiB) without restoring files locally.

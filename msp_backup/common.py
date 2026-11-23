@@ -424,7 +424,7 @@ class SystemManager:
         if not missing:
             return
         print(f"Missing dependencies: {', '.join(missing)}")
-        if input("Install the missing system/Python dependencies now? [y/N] ").strip().lower() != "y":
+        if not yes_no("Install the missing system/Python dependencies now?", default=False):
             fail("Dependencies were not installed.")
         if FAMILY == "debian":
             packages = ["bzip2", "coreutils", "util-linux", "fuse3", "logrotate"]

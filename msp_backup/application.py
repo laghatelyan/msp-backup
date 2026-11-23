@@ -479,6 +479,14 @@ class BackupWorkflowManager:
             fail("The backup path list was not found.")
         started = datetime.now(timezone.utc)
         timer = time.monotonic()
+        database_summary = {}
+        try:
+            database_manifest = read_json(DB_DUMP_DIR / "database-manifest.json", {})
+            if database_manifest:
+                database_summary = {"engine": database_manifest.get("engine"),
+                                    "count": len(database_manifest.get("databases", []))}
+        except BackupError as exc:
+            logger.warning("Could not read the database dump manifest: %s", exc)
         try:
             restic("backup", "--tag", BACKUP_TAG, "--files-from", str(PATHS_FILE))
         except Exception as exc:
@@ -486,6 +494,7 @@ class BackupWorkflowManager:
                 "result": "failure", "started_at": started.isoformat(timespec="seconds"),
                 "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "duration_seconds": round(time.monotonic() - timer), "error": str(exc),
+                "database": database_summary,
             })
             raise
         latest = {}
@@ -503,6 +512,7 @@ class BackupWorkflowManager:
             "result": "success", "started_at": started.isoformat(timespec="seconds"),
             "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "duration_seconds": round(time.monotonic() - timer), "snapshot": latest,
+            "database": database_summary,
         })
 
     @staticmethod
