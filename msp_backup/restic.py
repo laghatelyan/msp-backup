@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 
-from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, VERSION, decrypt_credential, fail, info, load_config, logger, remove_runtime, run_stream, runtime_dir, ui
+from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_CACHE_DIR, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, VERSION, decrypt_credential, fail, info, load_config, logger, remove_runtime, run_stream, runtime_dir, ui
 
 class ResticManager:
     """Run Restic with repository credentials kept in memory-backed storage."""
@@ -30,6 +30,10 @@ class ResticManager:
             env = os.environ.copy()
             env["RESTIC_REPOSITORY"] = config["repository"]
             env["RESTIC_PASSWORD_FILE"] = str(password)
+            RESTIC_CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chown(RESTIC_CACHE_DIR, 0, 0)
+            os.chmod(RESTIC_CACHE_DIR, 0o700)
+            env["XDG_CACHE_HOME"] = str(RESTIC_CACHE_DIR)
             if config["repository"].startswith("s3:") and config.get("backend") != "s3":
                 fail("This S3 repository has no saved credentials. Configure repository / S3 credentials from the menu.")
             if config.get("backend") == "s3":

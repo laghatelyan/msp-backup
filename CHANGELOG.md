@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.1
+
+- Set a private Restic cache directory under `/opt/msp-backup/` for systemd runs without `HOME`.
+
 ## 1.5.0
 
 - Made repository/S3 configuration accessible from item 16 on both first run and reconfiguration.

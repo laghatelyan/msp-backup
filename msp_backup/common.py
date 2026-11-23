@@ -23,6 +23,7 @@ ETC = APP_DIR / "data"
 OLD_ETC = Path("/etc/msp-backup")
 
 LOG_DIR = APP_DIR / "logs"
+RESTIC_CACHE_DIR = APP_DIR / "cache"
 
 LOG_FILE = LOG_DIR / "msp-backup.log"
 
