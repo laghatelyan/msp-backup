@@ -76,7 +76,6 @@ def info(message):
 
 
 def fail(message):
-    logger.error(message)
     raise BackupError(message)
 
 

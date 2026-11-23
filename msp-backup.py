@@ -10,7 +10,8 @@ if __name__ == "__main__":
         sys.exit(main())
     except BackupError as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        logger.error("%s", exc)
+        if logger.handlers:
+            logger.error("%s", exc)
         sys.exit(1)
     except KeyboardInterrupt:
         print("\nOperation cancelled.", file=sys.stderr)

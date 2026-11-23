@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+
+- Prevented startup errors from being printed multiple times before logging is configured.
+
 ## 1.1.2
 
 - Initialize and inject the Restic manager in the application composition root.
