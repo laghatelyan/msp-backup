@@ -101,6 +101,7 @@ class DatabaseBackupManager:
     def database_dump(self):
         config = read_json(DB_CONFIG_FILE)
         if not config:
+            self.cleanup_database_dump()
             return
         secure_runfs()
         Path("/run/msp-backup").mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.12.0
+
+- Extracted snapshot browsing, selective restore, and restore verification into a dedicated workflow component.
+- Made manual backups run database dumps, retention, cleanup, and notifications as one complete operation.
+- Added cleanup of staged database dumps to the systemd failure handler.
+- Consolidated successful scheduled backup finalization into one ordered action.
+
 ## 1.11.0
 
 - Added interactive backup path management with add, replace, remove, validation, and save/cancel.
