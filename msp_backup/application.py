@@ -892,23 +892,128 @@ class BackupWorkflowManager:
         print(f"SMTP notifications: {'enabled' if smtp.get('enabled') else 'disabled'}")
         print(f"Log: {LOG_FILE}")
 
+    def edit_backup_paths(self):
+        if not PATHS_FILE.is_file():
+            fail("Backup paths are not configured yet. Run the initial setup first.")
+        paths = list(dict.fromkeys(line.strip() for line in PATHS_FILE.read_text().splitlines() if line.strip()))
+        database_configured = bool(read_json(DB_CONFIG_FILE, {}))
+        managed_db_path = str(DB_DUMP_DIR)
+        if database_configured and managed_db_path not in paths:
+            paths.append(managed_db_path)
+        while True:
+            options = []
+            for index, value in enumerate(paths):
+                path = Path(value)
+                kind = "created automatically" if database_configured and value == managed_db_path and not path.exists() else "directory" if path.is_dir() else "file" if path.is_file() else "missing"
+                managed = " · managed by database backups" if database_configured and value == managed_db_path else ""
+                options.append((f"p{index}", value, f"{kind}{managed}"))
+            options.extend([
+                ("a", "Add a file or directory"),
+                ("s", "Save changes"),
+                ("0", "Cancel without saving"),
+            ])
+            choice = ui.select("BACKUP PATHS", options,
+                               "Select a path to replace or remove it. Database dump path is managed automatically.")
+            if choice in (None, "0"):
+                return
+            if choice == "a":
+                value = self.prompt_backup_path()
+                if value and value not in paths:
+                    paths.append(value)
+                elif value:
+                    ui.status("That path is already in the backup list.", "warning")
+                continue
+            if choice == "s":
+                if not paths:
+                    ui.status("At least one backup path is required.", "error")
+                    continue
+                try:
+                    self.validate_backup_paths(paths, managed_db_path if database_configured else None)
+                except ValueError as exc:
+                    ui.status(f"{exc} Remove or replace the invalid entry before saving.", "error")
+                    continue
+                temporary = PATHS_FILE.with_suffix(".txt.tmp")
+                temporary.write_text("\n".join(paths) + "\n", encoding="utf-8")
+                os.chown(temporary, 0, 0)
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, PATHS_FILE)
+                os.chown(PATHS_FILE, 0, 0)
+                info(f"Backup paths saved ({len(paths)} entries).")
+                return
+            if choice.startswith("p"):
+                index = int(choice[1:])
+                if 0 <= index < len(paths):
+                    self.edit_backup_path(paths, index, managed_db_path if database_configured else None)
+
+    @staticmethod
+    def prompt_backup_path():
+        while True:
+            value = input("Absolute path to an existing file or directory (0 to cancel): ").strip()
+            if value == "0":
+                return None
+            path = Path(value)
+            if "\n" not in value and "\r" not in value and path.is_absolute() and path.exists():
+                return str(path.resolve())
+            ui.status("Enter an existing absolute file or directory path.", "error")
+
+    @staticmethod
+    def validate_backup_paths(paths, managed_db_path=None):
+        for value in paths:
+            path = Path(value)
+            if not path.is_absolute() or (value != managed_db_path and not path.exists()):
+                raise ValueError(f"Backup path does not exist or is not absolute: {value}")
+        config = read_json(CONFIG_FILE, {})
+        repository = config.get("repository", "")
+        if repository.startswith("/") and config.get("backend") != "s3":
+            local_repo = Path(os.path.realpath(repository))
+            for value in paths:
+                source = Path(os.path.realpath(value))
+                if source == Path("/") or source == local_repo or source.is_relative_to(local_repo) or local_repo.is_relative_to(source):
+                    raise ValueError(f"Backup path {source} overlaps the local repository {local_repo}.")
+
+    def edit_backup_path(self, paths, index, managed_db_path=None):
+        value = paths[index]
+        if value == managed_db_path:
+            ui.status("The database dump path is managed automatically while database backups are configured.", "warning")
+            return
+        choice = ui.select("BACKUP PATH", [
+            ("1", "Replace this path"),
+            ("2", "Remove this path"),
+            ("0", "Back"),
+        ], value)
+        if choice == "1":
+            replacement = self.prompt_backup_path()
+            if replacement:
+                if replacement in paths and replacement != value:
+                    ui.status("That path is already in the backup list.", "warning")
+                else:
+                    paths[index] = replacement
+        elif choice == "2":
+            if len(paths) == 1:
+                ui.status("At least one backup path must remain.", "warning")
+                return
+            paths.pop(index)
+
     def configure_menu(self):
         choice = ui.select("SETTINGS", [
-            ("1", "Log rotation"),
-            ("2", "SMTP notifications"),
-            ("3", "Update URL"),
-            ("4", "Repository / S3 settings"),
+            ("1", "Backup paths"),
+            ("2", "Log rotation"),
+            ("3", "SMTP notifications"),
+            ("4", "Update URL"),
+            ("5", "Repository / S3 settings"),
             ("0", "Back"),
         ], "Use ↑/↓ or left/right, then Enter.")
         if choice in (None, "0"):
             return
         if choice == "1":
-            configure_log_rotation()
+            self.edit_backup_paths()
         elif choice == "2":
-            configure_notifications()
+            configure_log_rotation()
         elif choice == "3":
-            configure_update_url()
+            configure_notifications()
         elif choice == "4":
+            configure_update_url()
+        elif choice == "5":
             self.configure_repository()
 
     def snapshot_tools_menu(self):

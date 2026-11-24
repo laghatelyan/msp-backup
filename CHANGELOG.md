@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.11.0
+
+- Added interactive backup path management with add, replace, remove, validation, and save/cancel.
+- Kept the database dump path managed while database backups are configured.
+
 ## 1.10.0
 
 - Replaced remaining categorical prompts with arrow-key selections and retryable validation.
