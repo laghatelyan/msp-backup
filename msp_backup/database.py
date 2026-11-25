@@ -157,7 +157,13 @@ class DatabaseBackupManager:
             destination = DB_DUMP_DIR / f"mysql-{quote(name, safe='-_.')}.sql"
             command = [dumper, f"--defaults-extra-file={credentials}", "--single-transaction", "--routines", "--events", "--triggers", "--hex-blob", "--databases", name]
             self.dump_to_file(command, destination, label=f"MySQL/MariaDB database {name}")
-        accounts_query = "SELECT CONCAT(QUOTE(User), '@', QUOTE(Host)) FROM mysql.user ORDER BY User, Host"
+        # These are created and managed by the database server. In particular,
+        # MariaDB's mariadb.sys account is the definer of the mysql.user view
+        # on current releases and is not a restorable application account.
+        system_accounts = ("mariadb.sys", "mysql.sys", "mysql.session", "mysql.infoschema")
+        excluded = ", ".join("'" + name.replace("'", "''") + "'" for name in system_accounts)
+        accounts_query = ("SELECT CONCAT(QUOTE(User), '@', QUOTE(Host)) FROM mysql.user "
+                          f"WHERE User NOT IN ({excluded}) ORDER BY User, Host")
         accounts = [account for account in self.run_query([*base, f"--execute={accounts_query}"]).splitlines() if account]
         account_sql = ["-- MySQL/MariaDB accounts and grants; restore separately on a compatible server."]
         for account in accounts:
@@ -173,7 +179,8 @@ class DatabaseBackupManager:
         accounts_file.write_text("\n".join(account_sql) + "\n", encoding="utf-8")
         os.chmod(accounts_file, 0o600)
         return {"engine": "mysql", "databases": databases, "globals": accounts_file.name,
-                "accounts": len(accounts), "format": "one SQL file per database"}
+                "accounts": len(accounts), "system_accounts_excluded": list(system_accounts),
+                "format": "one SQL file per database"}
 
     def dump_postgresql_databases(self, config, environment):
         psql, dumper, globals_dumper = shutil.which("psql"), shutil.which("pg_dump"), shutil.which("pg_dumpall")

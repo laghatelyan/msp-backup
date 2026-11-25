@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.14.6
+
+- Exclude built-in MariaDB/MySQL service accounts from the restorable account-and-grants export.
+
 ## 1.14.5
 
 - Offer to restart MSP Backup after a successful manual application update.
