@@ -3,6 +3,7 @@
 ## 1.14.0
 
 - Added GitHub Actions release builds for standalone Linux x86_64 and aarch64 binaries.
+- Built against a pinned relocatable CPython distribution compatible with the PyInstaller shared-library requirement.
 - Replaced Python package ZIP self-updates with SHA-256 verified, atomic executable updates from a release manifest.
 - Added first-run installation support for the standalone binary.
 
