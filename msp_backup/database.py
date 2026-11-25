@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from .common import BackupError, DB_CONFIG_FILE, DB_DUMP_DIR, DB_PASSWORD_CRED, fail, info, logger, ui
+from .common import BackupError, DB_CONFIG_FILE, DB_DUMP_DIR, LEGACY_DB_DUMP_DIR, DB_PASSWORD_CRED, fail, info, logger, ui
 from .configuration import read_json, save_json
 from .credentials import decrypt_credential, remove_runtime, runtime_dir
 from .system import secure_runfs
@@ -34,9 +34,11 @@ class DatabaseBackupManager:
             self.cleanup_database_dump()
             return
         secure_runfs()
-        Path("/run/msp-backup").mkdir(mode=0o700, parents=True, exist_ok=True)
+        DB_DUMP_DIR.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         DB_DUMP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(Path("/run/msp-backup"), 0o700)
+        os.chown(DB_DUMP_DIR.parent, 0, 0)
+        os.chmod(DB_DUMP_DIR.parent, 0o700)
+        os.chown(DB_DUMP_DIR, 0, 0)
         os.chmod(DB_DUMP_DIR, 0o700)
         self.cleanup_database_dump()
         engine = config["engine"]
@@ -70,7 +72,7 @@ class DatabaseBackupManager:
         except Exception:
             self.cleanup_database_dump()
             raise
-        info(f"{engine}: {len(inventory['databases'])} database dump(s) are ready separately in the temporary memory-backed directory.")
+        info(f"{engine}: {len(inventory['databases'])} database dump(s) are ready separately in the protected temporary directory {DB_DUMP_DIR}.")
 
     @staticmethod
     def discover_sqlite_files(source):
@@ -132,8 +134,8 @@ class DatabaseBackupManager:
         free = shutil.disk_usage(DB_DUMP_DIR).free
         required = int(estimated_bytes * factor) + reserve
         if free < required:
-            fail(f"Not enough /run space for {label} database dumps: {free} bytes free, approximately {required} bytes recommended. Free memory-backed space or reduce the database set before retrying.")
-        ui.status(f"/run space check passed for {label} dumps ({free:,} bytes free; about {required:,} bytes recommended).", "success")
+            fail(f"Not enough disk space for {label} database dumps in {DB_DUMP_DIR}: {free} bytes free, approximately {required} bytes recommended. Free space on this filesystem or reduce the database set before retrying.")
+        ui.status(f"Disk space check passed for {label} dumps ({free:,} bytes free; about {required:,} bytes recommended).", "success")
 
     def dump_mysql_databases(self, credentials):
         client = shutil.which("mariadb") or shutil.which("mysql")
@@ -198,11 +200,12 @@ class DatabaseBackupManager:
                 "format": "one custom archive per database"}
 
     def cleanup_database_dump(self):
-        if not DB_DUMP_DIR.is_dir():
-            return
-        for path in DB_DUMP_DIR.iterdir():
-            if path.is_file() and (path.name.startswith(("mysql-", "postgresql-", "sqlite-")) or path.name == "database-manifest.json"):
-                path.unlink(missing_ok=True)
+        for directory in (DB_DUMP_DIR, LEGACY_DB_DUMP_DIR):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            for path in directory.iterdir():
+                if path.is_file() and (path.name.startswith(("mysql-", "postgresql-", "sqlite-")) or path.name == "database-manifest.json"):
+                    path.unlink(missing_ok=True)
 
 
 database_backup_manager = DatabaseBackupManager()

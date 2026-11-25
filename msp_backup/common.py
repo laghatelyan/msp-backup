@@ -23,7 +23,8 @@ LOGROTATE = Path("/etc/logrotate.d/msp-backup")
 APP_SYSTEMD_DIR = APP_DIR / "systemd"
 LOGROTATE_CONFIG = APP_SYSTEMD_DIR / "msp-backup.logrotate"
 
-DB_DUMP_DIR = Path("/run/msp-backup/db-dumps")
+DB_DUMP_DIR = APP_DIR / "tmp" / "db-dumps"
+LEGACY_DB_DUMP_DIR = Path("/run/msp-backup/db-dumps")
 
 SYSTEMD_DIR = Path("/etc/systemd/system")
 

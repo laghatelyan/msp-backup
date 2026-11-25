@@ -12,7 +12,7 @@ import sys
 import time
 
 
-from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, RUN_REPORT_FILE, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_positive_int, link_systemd_unit, ui, yes_no
+from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, LEGACY_DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, RUN_REPORT_FILE, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_positive_int, link_systemd_unit, ui, yes_no
 from .configuration import config_store, load_config, read_json, save_json
 from .credentials import credential_store, encrypt_credential, remove_old_secret
 from .system import run_stream, system_manager
@@ -517,6 +517,15 @@ class BackupWorkflowManager:
         load_config()
         if not PATHS_FILE.exists():
             fail("The backup path list was not found.")
+        if read_json(DB_CONFIG_FILE, {}):
+            managed_paths = {str(LEGACY_DB_DUMP_DIR), "/var/lib/msp-backup/db-dumps"}
+            paths = [line.strip() for line in PATHS_FILE.read_text().splitlines() if line.strip()]
+            paths = [str(DB_DUMP_DIR) if path in managed_paths else path for path in paths]
+            if str(DB_DUMP_DIR) not in paths:
+                paths.append(str(DB_DUMP_DIR))
+            PATHS_FILE.write_text("\n".join(dict.fromkeys(paths)) + "\n")
+            os.chown(PATHS_FILE, 0, 0)
+            os.chmod(PATHS_FILE, 0o600)
         started = datetime.now(timezone.utc)
         timer = time.monotonic()
         database_summary = {}

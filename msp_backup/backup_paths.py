@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from .common import CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, PATHS_FILE, fail, info, ui
+from .common import CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, LEGACY_DB_DUMP_DIR, PATHS_FILE, fail, info, ui
 from .configuration import read_json
 
 
@@ -24,6 +24,9 @@ class BackupPathManager:
         paths = list(dict.fromkeys(line.strip() for line in self.path_file.read_text().splitlines() if line.strip()))
         database_configured = bool(read_json(self.db_config_file, {}))
         managed_db_path = str(self.managed_db_path)
+        if database_configured:
+            old_managed_paths = {str(LEGACY_DB_DUMP_DIR), "/var/lib/msp-backup/db-dumps"}
+            paths = list(dict.fromkeys(managed_db_path if path in old_managed_paths else path for path in paths))
         if database_configured and managed_db_path not in paths:
             paths.append(managed_db_path)
         while True:

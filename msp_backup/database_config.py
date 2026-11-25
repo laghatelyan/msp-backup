@@ -11,7 +11,7 @@ from .common import (DB_CONFIG_FILE, DB_DUMP_DIR, DB_PASSWORD_CRED, ETC,
 from .configuration import save_json
 from .credentials import encrypt_credential
 from .panels import ControlPanelDetector
-from .system import run_stream, secure_runfs
+from .system import run_stream
 
 
 class DatabaseConfigurationWorkflow:
@@ -70,10 +70,11 @@ class DatabaseConfigurationWorkflow:
             else:
                 manager = "dnf" if shutil.which("dnf") else "yum"
                 run_stream([manager, "install", "-y", package])
-        secure_runfs()
-        Path("/run/msp-backup").mkdir(mode=0o700, exist_ok=True)
+        DB_DUMP_DIR.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         DB_DUMP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(Path("/run/msp-backup"), 0o700)
+        os.chown(DB_DUMP_DIR.parent, 0, 0)
+        os.chmod(DB_DUMP_DIR.parent, 0o700)
+        os.chown(DB_DUMP_DIR, 0, 0)
         os.chmod(DB_DUMP_DIR, 0o700)
         data = {"engine": engine}
         if engine in ("mysql", "postgresql"):

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.14.4
+
+- Store temporary database dumps under `/opt/msp-backup/tmp/db-dumps` instead of RAM-backed `/run` and check free space on the disk filesystem.
+- Migrate the managed database dump path in existing backup path lists.
+
 ## 1.14.3
 
 - Accept the default HestiaCP `root:root` mode `0660` for read-only MySQL credential import; continue rejecting world-writable config files.
