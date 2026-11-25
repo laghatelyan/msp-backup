@@ -445,6 +445,7 @@ class BackupWorkflowManager:
         info("Repository settings saved and verified.")
 
     def setup_backup(self):
+        system_manager.install_dependencies()
         ui.header("MSP BACKUP · INITIAL SETUP", "Configure repository, encryption, paths, and retention")
         ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
         repository_settings, local_repo = self.collect_repository_settings()
@@ -647,6 +648,16 @@ class BackupWorkflowManager:
         }
         self.run_submenu("SCHEDULES", actions)
 
+    def check_script_update_interactively(self):
+        if not check_script_update(install=False):
+            return
+        choice = ui.select("UPDATE INSTALLED", [
+            ("1", "Restart now to use the updated version"),
+            ("0", "Continue without restarting"),
+        ], "The current session is still running the previous version.")
+        if choice == "1":
+            os.execv(str(INSTALL_PATH), [str(INSTALL_PATH)])
+
     def run_submenu(self, title, actions):
         options = [(key, label) for key, (label, _) in actions.items()]
         options.append(("0", "Back to main menu"))
@@ -673,7 +684,7 @@ class BackupWorkflowManager:
             "6": ("Schedules", self.schedule_menu),
             "7": ("Settings", configure_menu),
             "8": ("Update Restic", update_restic),
-            "9": ("Check for MSP Backup updates", lambda: check_script_update(install=False)),
+            "9": ("Check for MSP Backup updates", self.check_script_update_interactively),
             "10": ("Status", show_status),
         }
         menu_options = [(key, label) for key, (label, _) in actions.items()]
@@ -830,8 +841,6 @@ class BackupApplication:
         self.system.detect_family()
         self.install_self()
         self.system.configure_logging()
-        if not self.argv:
-            self.system.install_dependencies()
         credential_backend = self.system.ensure_credential_support()
         logger.info("Selected credential encryption backend: %s", credential_backend)
         imported = self.workflows.import_legacy_config()
@@ -842,14 +851,12 @@ class BackupApplication:
             self.updates.install_script_update_timer()
         if self.dispatch_system_action():
             return 0
-        if self.argv:
-            self.system.install_dependencies()
         if not LOGROTATE.exists():
             self.system.write_logrotate()
         if CONFIG_FILE.exists():
             update = self.config.read_json(UPDATE_CONFIG_FILE, {})
             if update.get("manifest_url"):
-                self.updates.check_script_update(install=False)
+                backup_workflows.check_script_update_interactively()
         self.workflows.menu()
         return 0
 

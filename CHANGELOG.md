@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.14.5
+
+- Offer to restart MSP Backup after a successful manual application update.
+- Check/install general system dependencies during initial setup instead of prompting on every launch.
+
 ## 1.14.4
 
 - Store temporary database dumps under `/opt/msp-backup/tmp/db-dumps` instead of RAM-backed `/run` and check free space on the disk filesystem.
