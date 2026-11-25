@@ -32,11 +32,15 @@ class ControlPanelInstallation:
             raise BackupError(f"{self.name} MySQL configuration is not a regular local file: {path}")
         try:
             metadata = path.stat()
-            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
-                    or metadata.st_mode & 0o022):
-                raise BackupError(f"{self.name} MySQL configuration must be root-owned and not group/world-writable: {path}")
+            mode = stat.S_IMODE(metadata.st_mode)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or mode & 0o022:
+                raise BackupError(
+                    f"{self.name} MySQL configuration must be a root-owned regular file "
+                    f"with no group/world write permission (owner UID {metadata.st_uid}, "
+                    f"mode {mode:04o}): {path}"
+                )
             values = parse_shell_assignments(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError, shlex.Error) as exc:
+        except (OSError, UnicodeError, ValueError) as exc:
             raise BackupError(f"Could not read {self.name} MySQL configuration: {exc}") from exc
 
         required = ("HOST", "USER", "PASSWORD")

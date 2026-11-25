@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.14.1
+
+- Fixed HestiaCP/VestaCP credential import error handling and added owner/mode details when the panel config fails security checks.
+- Kept database setup in its retryable source-selection flow when panel credentials cannot be imported.
+
 ## 1.14.0
 
 - Added GitHub Actions release builds for standalone Linux x86_64 and aarch64 binaries.

@@ -7,7 +7,7 @@ import shutil
 
 from .common import (DB_CONFIG_FILE, DB_DUMP_DIR, DB_PASSWORD_CRED, ETC,
                      LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, PATHS_FILE,
-                     fail, get_family, info, input_default, ui, yes_no)
+                     BackupError, fail, get_family, info, input_default, ui, yes_no)
 from .configuration import save_json
 from .credentials import encrypt_credential
 from .panels import ControlPanelDetector
