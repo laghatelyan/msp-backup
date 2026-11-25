@@ -1,0 +1,97 @@
+name: Build and publish Linux binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            image: quay.io/pypa/manylinux2014_x86_64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux2014_aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          grep -Fq "VERSION = \"${version}\"" msp_backup/version.py
+          grep -Fq "version = \"${version}\"" pyproject.toml
+      - name: Build standalone executable
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            "${{ matrix.image }}" \
+            /bin/bash -lc '
+              set -euo pipefail
+              PY=/opt/python/cp311-cp311/bin/python
+              "$PY" -m pip install --disable-pip-version-check "pyinstaller==6.22.3" "cryptography==46.0.3"
+              "$PY" -m PyInstaller --clean --noconfirm --onefile --name msp-backup \
+                --hidden-import cryptography.fernet --collect-all cryptography msp-backup.py
+              install -m 0755 dist/msp-backup "dist/msp-backup-linux-${{ matrix.arch }}"
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.arch }}
+          path: dist/msp-backup-linux-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create checksums and release manifest
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum msp-backup-linux-* > SHA256SUMS
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          repository = os.environ["GH_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          version = tag.removeprefix("v")
+          assets = {}
+          for arch in ("x86_64", "aarch64"):
+              name = f"msp-backup-linux-{arch}"
+              data = Path(name).read_bytes()
+              assets[f"linux-{arch}"] = {
+                  "url": f"https://github.com/{repository}/releases/download/{tag}/{name}",
+                  "sha256": hashlib.sha256(data).hexdigest(),
+              }
+          Path("manifest.json").write_text(
+              json.dumps({"version": version, "assets": assets}, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" release-assets/* --generate-notes --title "MSP Backup ${{ github.ref_name }}"

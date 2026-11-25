@@ -1,31 +1,40 @@
+"""Release checks and atomic self-updates for the installed executable."""
+
 from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 import hashlib
-import io
 import json
 import os
+import platform
 import re
 import shutil
+import struct
 import sys
 import tempfile
-import zipfile
 
-from .restic import download
 from pathlib import Path
-from .common import APP_SYSTEMD_DIR, BackupError, INSTALL_PATH, PACKAGE_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_default, link_systemd_unit, logger, yes_no
+
+from .common import APP_SYSTEMD_DIR, BackupError, INSTALL_PATH, UPDATE_CONFIG_FILE, VERSION, fail, info, input_default, link_systemd_unit, logger, yes_no
 from .configuration import read_json, save_json
 from .system import run_stream
 
+MAX_MANIFEST_SIZE = 1024 * 1024
+MAX_BINARY_SIZE = 128 * 1024 * 1024
+ASSET_ARCHES = {"x86_64": ("linux-x86_64", 62), "amd64": ("linux-x86_64", 62),
+                "aarch64": ("linux-aarch64", 183), "arm64": ("linux-aarch64", 183)}
+
+
 class UpdateManager:
-    """Own updates configuration and operational workflows."""
+    """Own update configuration and operational workflows."""
 
     def configure_update_url(self):
         current = read_json(UPDATE_CONFIG_FILE, {})
-        print("The manifest must be JSON with version, url, and sha256 fields.")
-        url = input_default("URL manifest", current.get("manifest_url", ""))
+        print("Configure the HTTPS URL of the release manifest.json.")
+        url = input_default("Release manifest URL", current.get("manifest_url", ""))
         if not url.startswith("https://"):
             fail("Updates require an HTTPS URL.")
         save_json(UPDATE_CONFIG_FILE, {"manifest_url": url})
-        info("Update check URL saved.")
+        info("Update URL saved.")
 
     def parse_version(self, value):
         match = re.fullmatch(r"\s*v?(\d+(?:\.\d+){1,3})(?:[-+].*)?\s*", value)
@@ -34,95 +43,114 @@ class UpdateManager:
         parts = [int(part) for part in match.group(1).split(".")]
         return tuple((parts + [0, 0, 0, 0])[:4])
 
+    @staticmethod
+    def _download(url, limit):
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise BackupError("Release manifest and binary URLs must use HTTPS.")
+        request = Request(url, headers={"User-Agent": f"MSP-Backup/{VERSION}"})
+        with urlopen(request, timeout=60) as response:
+            if not response.geturl().startswith("https://"):
+                raise BackupError("The download redirected away from HTTPS.")
+            length = response.headers.get("Content-Length")
+            if length and int(length) > limit:
+                raise BackupError("The download exceeds its size limit.")
+            data = response.read(limit + 1)
+        if len(data) > limit:
+            raise BackupError("The download exceeds its size limit.")
+        return data
+
+    @staticmethod
+    def _platform_asset():
+        arch = ASSET_ARCHES.get(platform.machine().lower())
+        if not arch:
+            raise BackupError(f"Unsupported Linux architecture: {platform.machine()}")
+        return arch
+
+    @staticmethod
+    def _validate_elf(data, expected_machine):
+        if len(data) < 20 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] not in (1, 2):
+            raise BackupError("The downloaded asset is not a 64-bit Linux executable.")
+        byte_order = "<" if data[5] == 1 else ">"
+        machine = struct.unpack_from(byte_order + "H", data, 18)[0]
+        if machine != expected_machine:
+            raise BackupError("The binary architecture does not match this server.")
+
     def check_script_update(self, install=False, quiet=False):
         config = read_json(UPDATE_CONFIG_FILE, {})
         manifest_url = config.get("manifest_url")
         if not manifest_url:
             if not quiet:
-                print("Update URL is not configured (Settings → Update URL).")
+                print("Release manifest URL is not configured (Settings → Update URL).")
             return False
         try:
-            manifest = json.loads(download(manifest_url).decode("utf-8"))
+            manifest = json.loads(self._download(manifest_url, MAX_MANIFEST_SIZE).decode("utf-8"))
             latest = manifest["version"]
-            package_url = manifest["url"]
-            expected = manifest["sha256"].lower()
-            if not package_url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", expected):
-                fail("The manifest contains an insecure package URL or invalid SHA-256.")
-            if parse_version(latest) <= parse_version(VERSION):
+            assets = manifest["assets"]
+            if not isinstance(assets, dict):
+                raise BackupError("The release manifest has no valid assets map.")
+            asset_name, expected_machine = self._platform_asset()
+            asset = assets.get(asset_name)
+            if not isinstance(asset, dict):
+                raise BackupError(f"This release has no binary for {asset_name}.")
+            binary_url = asset["url"]
+            expected_hash = asset["sha256"].lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                raise BackupError("The release manifest contains an invalid SHA-256.")
+            if self.parse_version(latest) <= self.parse_version(VERSION):
                 if not quiet:
                     info(f"MSP Backup is up to date: {VERSION}.")
                 return False
             print(f"MSP Backup {latest} is available (installed: {VERSION}).")
-            if not install:
-                if not yes_no("Download, verify the SHA-256, and install the update?"):
-                    return False
-            archive = download(package_url)
-            if hashlib.sha256(archive).hexdigest() != expected:
-                fail("The package SHA-256 does not match the manifest.")
-            if len(archive) > 20 * 1024 * 1024:
-                fail("The update package exceeds the 20 MiB size limit.")
-            parent = PACKAGE_DIR.parent
-            stage_root = Path(tempfile.mkdtemp(prefix="msp-backup-update.", dir=parent))
-            staged_package = stage_root / "msp_backup"
-            staged_package.mkdir(mode=0o755)
-            total_size = 0
-            try:
-                with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
-                    entries = bundle.infolist()
-                    if len(entries) > 32:
-                        fail("The update package contains too many entries.")
-                    written = set()
-                    for entry in entries:
-                        member = Path(entry.filename)
-                        if member.is_dir():
-                            continue
-                        if len(member.parts) != 2 or member.parts[0] != "msp_backup" or member.suffix != ".py":
-                            fail(f"Unexpected path in update package: {entry.filename}")
-                        if member.name in written:
-                            fail(f"Duplicate module in update package: {member.name}")
-                        written.add(member.name)
-                        if entry.file_size > 2 * 1024 * 1024:
-                            fail("An update module exceeds the 2 MiB size limit.")
-                        total_size += entry.file_size
-                        if total_size > 16 * 1024 * 1024:
-                            fail("The uncompressed update package exceeds the 16 MiB size limit.")
-                        unix_mode = entry.external_attr >> 16
-                        if unix_mode and (unix_mode & 0o170000) == 0o120000:
-                            fail("Symbolic links are not allowed in update packages.")
-                        destination = staged_package / member.name
-                        destination.write_bytes(bundle.read(entry))
-                version_file = staged_package / "version.py"
-                if not version_file.is_file():
-                    fail("The update package does not contain version.py.")
-                text = version_file.read_text(encoding="utf-8")
-                match = re.search(r'^VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
-                if not match or match.group(1) != latest:
-                    fail("The package version does not match the manifest.")
-                for module in staged_package.glob("*.py"):
-                    os.chmod(module, 0o644)
-                    os.chown(module, 0, 0)
-                previous = PACKAGE_DIR.with_name("msp_backup.previous")
-                if previous.exists():
-                    shutil.rmtree(previous)
-                os.replace(PACKAGE_DIR, previous)
-                try:
-                    os.replace(staged_package, PACKAGE_DIR)
-                except OSError:
-                    os.replace(previous, PACKAGE_DIR)
-                    raise
-                shutil.rmtree(previous)
-                info(f"MSP Backup was updated to {latest}; the new version will run on the next start.")
-            finally:
-                shutil.rmtree(stage_root, ignore_errors=True)
+            if not install and not yes_no("Download, verify, and install this release?"):
+                return False
+            binary = self._download(binary_url, MAX_BINARY_SIZE)
+            if hashlib.sha256(binary).hexdigest() != expected_hash:
+                raise BackupError("The binary SHA-256 does not match the release manifest.")
+            self._validate_elf(binary, expected_machine)
+            self._install_binary(binary)
+            info(f"MSP Backup was updated to {latest}; the new version will run on the next start.")
             return True
-        except (URLError, HTTPError, OSError, ValueError, KeyError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        except (URLError, HTTPError, OSError, ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+            logger.exception("Update check failed")
+            print(f"Could not check for or install the update: {exc}", file=sys.stderr)
+            return False
+        except BackupError as exc:
             logger.exception("Update check failed")
             print(f"Could not check for or install the update: {exc}", file=sys.stderr)
             return False
 
+    @staticmethod
+    def _install_binary(binary):
+        INSTALL_PATH.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        if INSTALL_PATH.is_symlink():
+            raise BackupError(f"Refusing to replace a symlink at {INSTALL_PATH}.")
+        fd, staged_name = tempfile.mkstemp(prefix=".msp-backup-update-", dir=INSTALL_PATH.parent)
+        staged = Path(staged_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(binary)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(staged, 0o755)
+            os.chown(staged, 0, 0)
+            backup = INSTALL_PATH.with_name("msp-backup.previous")
+            if INSTALL_PATH.exists():
+                if not INSTALL_PATH.is_file():
+                    raise BackupError(f"Installed application is not a regular file: {INSTALL_PATH}.")
+                backup_tmp = backup.with_name(".msp-backup-previous.tmp")
+                shutil.copy2(INSTALL_PATH, backup_tmp)
+                os.chown(backup_tmp, 0, 0)
+                os.chmod(backup_tmp, 0o755)
+                os.replace(backup_tmp, backup)
+            os.replace(staged, INSTALL_PATH)
+            os.chown(INSTALL_PATH, 0, 0)
+            os.chmod(INSTALL_PATH, 0o755)
+        finally:
+            staged.unlink(missing_ok=True)
+
     def install_script_update_timer(self):
         if not read_json(UPDATE_CONFIG_FILE, {}).get("manifest_url"):
-            configure_update_url()
+            self.configure_update_url()
         service = f"""[Unit]
     Description=Check for MSP Backup updates
 

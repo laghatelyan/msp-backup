@@ -730,14 +730,34 @@ class BackupApplication:
         self.workflows = backup_workflows
 
     def install_self(self):
-        current = Path(sys.argv[0]).resolve()
+        frozen = getattr(sys, "frozen", False)
+        current = Path(sys.executable if frozen else sys.argv[0]).resolve()
         launcher = PACKAGE_DIR.parent / "msp-backup.py"
-        if current.name == "__main__.py" and launcher.is_file():
+        if not frozen and current.name == "__main__.py" and launcher.is_file():
             current = launcher
         if current == INSTALL_PATH:
             return False
+        # Keep a frozen installation from being replaced by a source checkout.
+        if not frozen and INSTALL_PATH.is_file():
+            try:
+                with INSTALL_PATH.open("rb") as installed:
+                    if installed.read(4) == b"\x7fELF":
+                        return False
+            except OSError:
+                pass
         INSTALL_PATH.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         shutil.copy2(current, INSTALL_PATH)
+        if frozen:
+            os.chown(APP_DIR, 0, 0)
+            os.chmod(APP_DIR, 0o755)
+            os.chown(INSTALL_PATH, 0, 0)
+            os.chmod(INSTALL_PATH, 0o755)
+            if LEGACY_RESTIC_BIN.is_file() and not RESTIC_INSTALL_BIN.exists():
+                shutil.move(str(LEGACY_RESTIC_BIN), str(RESTIC_INSTALL_BIN))
+                os.chown(RESTIC_INSTALL_BIN, 0, 0)
+                os.chmod(RESTIC_INSTALL_BIN, 0o755)
+            os.execv(str(INSTALL_PATH), [str(INSTALL_PATH), *self.argv])
+            return True
         package_temp = INSTALL_PATH.parent / "msp_backup.new"
         if package_temp.exists():
             shutil.rmtree(package_temp)

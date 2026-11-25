@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.14.0
+
+- Added GitHub Actions release builds for standalone Linux x86_64 and aarch64 binaries.
+- Replaced Python package ZIP self-updates with SHA-256 verified, atomic executable updates from a release manifest.
+- Added first-run installation support for the standalone binary.
+
 ## 1.13.0
 
 - Added safe discovery of HestiaCP and VestaCP MySQL credentials from their local panel configuration.
