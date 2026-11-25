@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.14.8
+
+- Fix a missing `posixpath` import that crashed selective snapshot restore browsing.
+
 ## 1.14.7
 
 - Parse MariaDB `SHOW CREATE USER` output when it is returned as a single column by the batch client.
