@@ -169,9 +169,15 @@ class DatabaseBackupManager:
         for account in accounts:
             create_query = f"SHOW CREATE USER {account}"
             create_rows = self.run_query([*base, f"--execute={create_query}"]).splitlines()
-            if not create_rows or "\t" not in create_rows[0]:
+            if not create_rows:
                 fail(f"Could not export account definition for {account}.")
-            account_sql.append(create_rows[0].split("\t", 1)[1].rstrip(";") + ";")
+            # With --skip-column-names MariaDB returns the CREATE USER SQL as
+            # a single column; some client/server combinations emit metadata
+            # as an additional tab-separated column. Accept either form.
+            statement = create_rows[0].rsplit("\t", 1)[-1].strip()
+            if not statement.upper().startswith("CREATE USER "):
+                fail(f"Could not parse account definition returned for {account}.")
+            account_sql.append(statement.rstrip(";") + ";")
             grants_query = f"SHOW GRANTS FOR {account}"
             grants = self.run_query([*base, f"--execute={grants_query}"]).splitlines()
             account_sql.extend(grant.rstrip(";") + ";" for grant in grants if grant)

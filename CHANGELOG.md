@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.14.7
+
+- Parse MariaDB `SHOW CREATE USER` output when it is returned as a single column by the batch client.
+
 ## 1.14.6
 
 - Exclude built-in MariaDB/MySQL service accounts from the restorable account-and-grants export.
