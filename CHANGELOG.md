@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.14.2
+
+- Kept panel credential import errors visible so the operator can read the security-check failure before choosing another database source.
+
 ## 1.14.1
 
 - Fixed HestiaCP/VestaCP credential import error handling and added owner/mode details when the panel config fails security checks.

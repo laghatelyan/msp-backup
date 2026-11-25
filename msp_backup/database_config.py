@@ -51,6 +51,7 @@ class DatabaseConfigurationWorkflow:
                 break
             except BackupError as exc:
                 ui.status(f"{exc} Select another source or configure credentials manually.", "error")
+                ui.pause("Review the panel error; press any key to choose another source")
         ui.status("The database account must be able to list and export all databases.", "warning")
         if engine == "mysql":
             ui.status("MySQL/MariaDB also needs permission to read account definitions and grants.", "warning")
