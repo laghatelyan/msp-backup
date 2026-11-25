@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.14.3
+
+- Accept the default HestiaCP `root:root` mode `0660` for read-only MySQL credential import; continue rejecting world-writable config files.
+
 ## 1.14.2
 
 - Kept panel credential import errors visible so the operator can read the security-check failure before choosing another database source.

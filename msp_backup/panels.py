@@ -33,10 +33,14 @@ class ControlPanelInstallation:
         try:
             metadata = path.stat()
             mode = stat.S_IMODE(metadata.st_mode)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or mode & 0o022:
+            # HestiaCP ships mysql.conf as root:root 0660. Group write is part
+            # of that supported default and must not prevent read-only import.
+            # Reject only files writable by every local user, which could let
+            # an unprivileged account replace the database credentials.
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or mode & 0o002:
                 raise BackupError(
                     f"{self.name} MySQL configuration must be a root-owned regular file "
-                    f"with no group/world write permission (owner UID {metadata.st_uid}, "
+                    f"that is not world-writable (owner UID {metadata.st_uid}, "
                     f"mode {mode:04o}): {path}"
                 )
             values = parse_shell_assignments(path.read_text(encoding="utf-8"))
