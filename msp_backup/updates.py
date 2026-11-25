@@ -11,7 +11,9 @@ import zipfile
 
 from .restic import download
 from pathlib import Path
-from .common import APP_SYSTEMD_DIR, BackupError, INSTALL_PATH, PACKAGE_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_default, link_systemd_unit, logger, read_json, run_stream, save_json, yes_no
+from .common import APP_SYSTEMD_DIR, BackupError, INSTALL_PATH, PACKAGE_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_default, link_systemd_unit, logger, yes_no
+from .configuration import read_json, save_json
+from .system import run_stream
 
 class UpdateManager:
     """Own updates configuration and operational workflows."""

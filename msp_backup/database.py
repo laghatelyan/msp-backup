@@ -1,5 +1,4 @@
 from pathlib import Path
-import getpass
 import os
 import shutil
 import sqlite3
@@ -8,89 +7,20 @@ import sys
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from .common import DB_CONFIG_FILE, DB_DUMP_DIR, DB_PASSWORD_CRED, ETC, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, PATHS_FILE, decrypt_credential, encrypt_credential, fail, get_family, info, input_default, logger, read_json, remove_runtime, run_stream, runtime_dir, save_json, secure_runfs, ui, yes_no
+from .common import BackupError, DB_CONFIG_FILE, DB_DUMP_DIR, DB_PASSWORD_CRED, fail, info, logger, ui
+from .configuration import read_json, save_json
+from .credentials import decrypt_credential, remove_runtime, runtime_dir
+from .system import secure_runfs
+from .database_config import DatabaseConfigurationWorkflow
 
 class DatabaseBackupManager:
-    """Own database configuration and operational workflows."""
+    """Coordinate database dump preparation, engine exports, and cleanup."""
+
+    def __init__(self, configuration=None):
+        self.configuration = configuration or DatabaseConfigurationWorkflow()
 
     def configure_database(self):
-        ETC.mkdir(mode=0o700, parents=True, exist_ok=True)
-        choice = ui.select("DATABASE BACKUP", [
-            ("1", "MySQL / MariaDB — discover every database"),
-            ("2", "PostgreSQL — discover every database"),
-            ("3", "SQLite — back up one file or discover files in a directory"),
-            ("0", "Cancel"),
-        ], "Use ↑/↓ or left/right, then Enter.")
-        engines = {"1": "mysql", "2": "postgresql", "3": "sqlite"}
-        if choice in (None, "0"):
-            return False
-        engine = engines[choice]
-        ui.status("The database account must be able to list and export all databases.", "warning")
-        if engine == "mysql":
-            ui.status("MySQL/MariaDB also needs permission to read account definitions and grants.", "warning")
-        clients = {"mysql": (("mariadb-dump", "mysqldump"), ("mariadb", "mysql")),
-                   "postgresql": (("pg_dump",), ("pg_dumpall",), ("psql",)),
-                   "sqlite": ()}[engine]
-        if any(not any(shutil.which(cmd) for cmd in group) for group in clients):
-            family = get_family()
-            package = {"mysql": "default-mysql-client" if family == "debian" else "mariadb", "postgresql": "postgresql-client" if family == "debian" else "postgresql", "sqlite": "sqlite3"}[engine]
-            if not yes_no(f"Package {package} is required. Install it?"):
-                fail("The database client utility is not installed.")
-            command = ["apt-get", "update"] if family == "debian" else None
-            if command:
-                run_stream(command)
-                run_stream(["apt-get", "install", "-y", package])
-            else:
-                manager = "dnf" if shutil.which("dnf") else "yum"
-                run_stream([manager, "install", "-y", package])
-        secure_runfs()
-        Path("/run/msp-backup").mkdir(mode=0o700, exist_ok=True)
-        DB_DUMP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(Path("/run/msp-backup"), 0o700)
-        os.chmod(DB_DUMP_DIR, 0o700)
-        data = {"engine": engine}
-        if engine in ("mysql", "postgresql"):
-            default_port = "3306" if engine == "mysql" else "5432"
-            default_host = "localhost" if engine == "mysql" else "127.0.0.1"
-            while True:
-                data["host"] = input_default("Database host", default_host).strip()
-                if data["host"]:
-                    break
-                ui.status("Database host cannot be empty.", "error")
-            while True:
-                port = input_default("Database port", default_port)
-                if port.isdecimal() and 1 <= int(port) <= 65535:
-                    break
-                ui.status("Enter a port from 1 to 65535.", "error")
-            data["port"] = int(port)
-            while True:
-                data["user"] = input("Database user: ").strip()
-                if data["user"]:
-                    break
-                ui.status("Database user is required.", "error")
-            secret = getpass.getpass("Database password: ")
-            encrypt_credential("msp-backup-database", secret.encode(), DB_PASSWORD_CRED)
-        else:
-            while True:
-                value = input("Absolute path to a SQLite file or containing directory (0 to cancel): ").strip()
-                if value == "0":
-                    return False
-                path = Path(value)
-                if path.is_absolute() and (path.is_file() or path.is_dir()):
-                    break
-                ui.status("Enter the absolute path to an existing SQLite file or directory.", "error")
-            data["path"] = str(path)
-            DB_PASSWORD_CRED.unlink(missing_ok=True)
-        save_json(DB_CONFIG_FILE, data)
-        paths = PATHS_FILE.read_text().splitlines() if PATHS_FILE.exists() else []
-        if str(DB_DUMP_DIR) not in paths:
-            paths.append(str(DB_DUMP_DIR))
-        PATHS_FILE.write_text("\n".join(paths) + "\n")
-        os.chmod(PATHS_FILE, 0o600)
-        LEGACY_MYSQL_CRED.unlink(missing_ok=True)
-        LEGACY_PGPASS_CRED.unlink(missing_ok=True)
-        info(f"{engine} backups configured; all databases are discovered at backup time and stored separately.")
-        return True
+        return self.configuration.configure_database()
 
     def escape_mysql(self, value):
         return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "")

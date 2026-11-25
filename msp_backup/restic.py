@@ -10,7 +10,10 @@ import re
 import subprocess
 import sys
 
-from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_CACHE_DIR, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, VERSION, decrypt_credential, fail, info, load_config, logger, remove_runtime, run_stream, runtime_dir, ui
+from .common import BackupError, RESTIC_API, RESTIC_BIN, RESTIC_CACHE_DIR, RESTIC_PASSWORD_CRED, S3_CREDENTIALS_CRED, VERSION, fail, info, logger, ui
+from .configuration import load_config
+from .credentials import decrypt_credential, remove_runtime, runtime_dir
+from .system import run_stream
 
 class ResticManager:
     """Run Restic with repository credentials kept in memory-backed storage."""

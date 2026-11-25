@@ -7,7 +7,8 @@ import os
 import shutil
 import tempfile
 
-from .common import BackupError, credential_store, fail, ui, yes_no
+from .common import BackupError, fail, ui, yes_no
+from .credentials import credential_store
 from .restic import restic
 
 

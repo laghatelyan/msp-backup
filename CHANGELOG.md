@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.13.0
+
+- Added safe discovery of HestiaCP and VestaCP MySQL credentials from their local panel configuration.
+- Split terminal interaction, database setup, backup path management, FUSE mounts, credentials, system operations, and config storage into dedicated modules.
+- Fixed arrow-key input parsing so held/repeated navigation events are processed one at a time.
+
 ## 1.12.0
 
 - Extracted snapshot browsing, selective restore, and restore verification into a dedicated workflow component.

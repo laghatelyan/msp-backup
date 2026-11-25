@@ -12,25 +12,45 @@ import sys
 import time
 
 
-from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, RUN_REPORT_FILE, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, config_store, credential_store, encrypt_credential, fail, info, input_positive_int, link_systemd_unit, load_config, read_json, remove_old_secret, run_stream, save_json, system_manager, ui, yes_no
+from .common import APP_DIR, APP_SYSTEMD_DIR, BACKUP_TAG, CONFIG_FILE, DB_CONFIG_FILE, DB_DUMP_DIR, ETC, INSTALL_PATH, LEGACY_MYSQL_CRED, LEGACY_PGPASS_CRED, LEGACY_RESTIC_BIN, LOG_DIR, LOGROTATE, LOG_FILE, OLD_ETC, PACKAGE_DIR, PATHS_FILE, RESTIC_BIN, RESTIC_INSTALL_BIN, RESTIC_PASSWORD_CRED, RUN_REPORT_FILE, S3_CREDENTIALS_CRED, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, SYSTEMD_DIR, UPDATE_CONFIG_FILE, VERSION, fail, info, input_positive_int, link_systemd_unit, ui, yes_no
+from .configuration import config_store, load_config, read_json, save_json
+from .credentials import credential_store, encrypt_credential, remove_old_secret
+from .system import run_stream, system_manager
+
 from .common import BackupError, logger
 from .restic import ensure_restic, restic, restic_installer, restic_manager, update_restic
 from .database import configure_database, database_backup_manager
 from .notifications import configure_log_rotation, configure_notifications, notification_manager
 from .updates import check_script_update, configure_update_url, install_script_update_timer, update_manager
 from .snapshot_workflows import SnapshotWorkflow
+from .backup_paths import BackupPathManager
+from .mounts import SnapshotMountManager
 
 class BackupWorkflowManager:
     """Own setup, backup, mount, and top-level interactive workflows."""
 
     def __init__(self):
         self.snapshots = SnapshotWorkflow()
+        self.path_manager = BackupPathManager()
+        self.mount_manager = SnapshotMountManager()
 
     def list_snapshots(self):
         return self.snapshots.list_snapshots()
 
     def test_restore_file(self):
         return self.snapshots.test_restore_file()
+
+    def edit_backup_paths(self):
+        return self.path_manager.edit_backup_paths()
+
+    def mount_worker(self, target):
+        return self.mount_manager.mount_worker(target)
+
+    def mount_snapshots(self):
+        return self.mount_manager.mount_snapshots()
+
+    def unmount_snapshots(self):
+        return self.mount_manager.unmount_snapshots()
 
     def ask_until_valid(self, prompt, validator, *, default=None, secret=False):
         while True:
@@ -548,48 +568,6 @@ class BackupWorkflowManager:
         restic("forget", "--tag", BACKUP_TAG, "--keep-daily", str(config["daily"]), "--keep-weekly", str(config["weekly"]), "--keep-monthly", str(config["monthly"]), "--prune")
 
 
-    def mount_worker(self, target):
-        target_path = Path(target)
-        if not target_path.is_absolute() or target_path == Path("/"):
-            fail("Invalid mount directory.")
-        restic("mount", str(target_path))
-
-    def mount_snapshots(self):
-        if not Path("/dev/fuse").exists():
-            if shutil.which("modprobe"):
-                subprocess.run(["modprobe", "fuse"], check=False)
-            if not Path("/dev/fuse").exists():
-                fail("/dev/fuse was not found; enable FUSE on the server.")
-        target = Path(input("Mount directory (absolute path): ").strip())
-        if not target.is_absolute() or target == Path("/"):
-            fail("Enter a dedicated absolute directory.")
-        target.mkdir(parents=True, exist_ok=True)
-        if subprocess.run(["mountpoint", "-q", str(target)]).returncode == 0:
-            fail("The directory is already mounted.")
-        log_path = ETC / "mount.log"
-        with log_path.open("a") as log:
-            process = subprocess.Popen([str(INSTALL_PATH), "--mount-worker", str(target)], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        (ETC / "mount.pid").write_text(str(process.pid))
-        (ETC / "mount.path").write_text(str(target))
-        os.chmod(ETC / "mount.pid", 0o600)
-        os.chmod(ETC / "mount.path", 0o600)
-        time.sleep(2)
-        if subprocess.run(["mountpoint", "-q", str(target)]).returncode:
-            fail(f"Could not mount snapshots. Log: {log_path}")
-        info(f"Snapshots mounted at {target}; use snapshots/ and latest/.")
-
-    def unmount_snapshots(self):
-        path_file = ETC / "mount.path"
-        if not path_file.exists():
-            fail("No active mount point is recorded.")
-        target = path_file.read_text().strip()
-        if subprocess.run(["mountpoint", "-q", target]).returncode:
-            fail(f"Directory is not mounted: {target}")
-        command = shutil.which("fusermount3") or shutil.which("fusermount") or shutil.which("umount")
-        args = [command, "-u", target] if Path(command).name.startswith("fuser") else [command, target]
-        run_stream(args)
-        for name in ("mount.path", "mount.pid"):
-            (ETC / name).unlink(missing_ok=True)
 
     def show_status(self):
         if RESTIC_BIN.exists():
@@ -605,107 +583,6 @@ class BackupWorkflowManager:
         print(f"SMTP notifications: {'enabled' if smtp.get('enabled') else 'disabled'}")
         print(f"Log: {LOG_FILE}")
 
-    def edit_backup_paths(self):
-        if not PATHS_FILE.is_file():
-            fail("Backup paths are not configured yet. Run the initial setup first.")
-        paths = list(dict.fromkeys(line.strip() for line in PATHS_FILE.read_text().splitlines() if line.strip()))
-        database_configured = bool(read_json(DB_CONFIG_FILE, {}))
-        managed_db_path = str(DB_DUMP_DIR)
-        if database_configured and managed_db_path not in paths:
-            paths.append(managed_db_path)
-        while True:
-            options = []
-            for index, value in enumerate(paths):
-                path = Path(value)
-                kind = "created automatically" if database_configured and value == managed_db_path and not path.exists() else "directory" if path.is_dir() else "file" if path.is_file() else "missing"
-                managed = " · managed by database backups" if database_configured and value == managed_db_path else ""
-                options.append((f"p{index}", value, f"{kind}{managed}"))
-            options.extend([
-                ("a", "Add a file or directory"),
-                ("s", "Save changes"),
-                ("0", "Cancel without saving"),
-            ])
-            choice = ui.select("BACKUP PATHS", options,
-                               "Select a path to replace or remove it. Database dump path is managed automatically.")
-            if choice in (None, "0"):
-                return
-            if choice == "a":
-                value = self.prompt_backup_path()
-                if value and value not in paths:
-                    paths.append(value)
-                elif value:
-                    ui.status("That path is already in the backup list.", "warning")
-                continue
-            if choice == "s":
-                if not paths:
-                    ui.status("At least one backup path is required.", "error")
-                    continue
-                try:
-                    self.validate_backup_paths(paths, managed_db_path if database_configured else None)
-                except ValueError as exc:
-                    ui.status(f"{exc} Remove or replace the invalid entry before saving.", "error")
-                    continue
-                temporary = PATHS_FILE.with_suffix(".txt.tmp")
-                temporary.write_text("\n".join(paths) + "\n", encoding="utf-8")
-                os.chown(temporary, 0, 0)
-                os.chmod(temporary, 0o600)
-                os.replace(temporary, PATHS_FILE)
-                os.chown(PATHS_FILE, 0, 0)
-                info(f"Backup paths saved ({len(paths)} entries).")
-                return
-            if choice.startswith("p"):
-                index = int(choice[1:])
-                if 0 <= index < len(paths):
-                    self.edit_backup_path(paths, index, managed_db_path if database_configured else None)
-
-    @staticmethod
-    def prompt_backup_path():
-        while True:
-            value = input("Absolute path to an existing file or directory (0 to cancel): ").strip()
-            if value == "0":
-                return None
-            path = Path(value)
-            if "\n" not in value and "\r" not in value and path.is_absolute() and path.exists():
-                return str(path.resolve())
-            ui.status("Enter an existing absolute file or directory path.", "error")
-
-    @staticmethod
-    def validate_backup_paths(paths, managed_db_path=None):
-        for value in paths:
-            path = Path(value)
-            if not path.is_absolute() or (value != managed_db_path and not path.exists()):
-                raise ValueError(f"Backup path does not exist or is not absolute: {value}")
-        config = read_json(CONFIG_FILE, {})
-        repository = config.get("repository", "")
-        if repository.startswith("/") and config.get("backend") != "s3":
-            local_repo = Path(os.path.realpath(repository))
-            for value in paths:
-                source = Path(os.path.realpath(value))
-                if source == Path("/") or source == local_repo or source.is_relative_to(local_repo) or local_repo.is_relative_to(source):
-                    raise ValueError(f"Backup path {source} overlaps the local repository {local_repo}.")
-
-    def edit_backup_path(self, paths, index, managed_db_path=None):
-        value = paths[index]
-        if value == managed_db_path:
-            ui.status("The database dump path is managed automatically while database backups are configured.", "warning")
-            return
-        choice = ui.select("BACKUP PATH", [
-            ("1", "Replace this path"),
-            ("2", "Remove this path"),
-            ("0", "Back"),
-        ], value)
-        if choice == "1":
-            replacement = self.prompt_backup_path()
-            if replacement:
-                if replacement in paths and replacement != value:
-                    ui.status("That path is already in the backup list.", "warning")
-                else:
-                    paths[index] = replacement
-        elif choice == "2":
-            if len(paths) == 1:
-                ui.status("At least one backup path must remain.", "warning")
-                return
-            paths.pop(index)
 
     def configure_menu(self):
         choice = ui.select("SETTINGS", [

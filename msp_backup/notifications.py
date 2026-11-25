@@ -8,7 +8,10 @@ import ssl
 import subprocess
 import sys
 
-from .common import BackupError, ETC, RUN_REPORT_FILE, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, VERSION, decrypt_credential, encrypt_credential, fail, info, input_default, logger, read_json, remove_runtime, runtime_dir, save_json, ui, write_logrotate, yes_no
+from .common import BackupError, ETC, RUN_REPORT_FILE, SMTP_CONFIG_FILE, SMTP_PASSWORD_CRED, VERSION, fail, info, input_default, logger, ui, yes_no
+from .configuration import read_json, save_json
+from .credentials import decrypt_credential, encrypt_credential, remove_runtime, runtime_dir
+from .system import write_logrotate
 
 class NotificationManager:
     """Own notifications configuration and operational workflows."""
